@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>台積電 ADR 行情推算機 (V21 強力修復版)</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .input-field { background: rgba(15, 23, 42, 0.8); border: 1px solid #334155; color: white; width: 100%; transition: all 0.2s; }
+        .input-field:focus { border-color: #3b82f6; outline: none; background: rgba(15, 23, 42, 1); }
+        .btn-refresh { background: linear-gradient(to right, #2563eb, #3b82f6); }
+        .btn-refresh:hover { background: linear-gradient(to right, #1d4ed8, #2563eb); transform: translateY(-1px); }
+        .btn-refresh:disabled { opacity: 0.7; cursor: wait; }
+        .spinner { display: inline-block; width: 1rem; height: 1rem; border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s infinite; margin-right: 8px;}
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .text-up { color: #f87171; } .text-down { color: #4ade80; }
+        .badge { font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; margin-left: 8px; background: #334155; color: #94a3b8; }
+        .badge.active { background: #059669; color: white; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useMemo, useEffect } = React;
+
+        const App = () => {
+            // Data State
+            const [baseData, setBaseData] = useState({ adr: 0, tw2330: 0, tw0050: 0, tw631: 0 });
+            const [liveData, setLiveData] = useState({ adr: 0, fx: 0 });
+            const [tsmWeight, setTsmWeight] = useState(60);
+            const [loading, setLoading] = useState(false);
+            const [status, setStatus] = useState("準備就緒");
+            const [source, setSource] = useState("");
+
+            // Calculation Logic
+            const adrChangePct = useMemo(() => {
+                if (!baseData.adr || !liveData.adr) return 0;
+                return ((liveData.adr - baseData.adr) / baseData.adr) * 100;
+            }, [liveData.adr, baseData.adr]);
+
+            const parity = useMemo(() => (liveData.adr / 5) * liveData.fx, [liveData.adr, liveData.fx]);
+            const premium = useMemo(() => baseData.tw2330 ? ((parity - baseData.tw2330) / baseData.tw2330) * 100 : 0, [parity, baseData.tw2330]);
+
+            const predictions = useMemo(() => {
+                if (!baseData.tw2330) return null;
+                const getPrice = (base, pct) => Math.round(base * (1 + pct/100));
+                
+                const p2330 = {
+                    con: getPrice(baseData.tw2330, adrChangePct * 0.6),
+                    neu: getPrice(baseData.tw2330, adrChangePct * 0.8),
+                    agg: getPrice(baseData.tw2330, adrChangePct * 0.95)
+                };
+                
+                const get0050 = (t2330) => {
+                    const impact = ((t2330 - baseData.tw2330)/baseData.tw2330) * 100 * (tsmWeight/100);
+                    // 修正：計算時若 baseData.tw0050 為 0 會導致 NaN，這裡做防呆
+                    if (!baseData.tw0050) return 0;
+                    return parseFloat((baseData.tw0050 * (1 + impact/100)).toFixed(2));
+                };
+                const p0050 = { con: get0050(p2330.con), neu: get0050(p2330.neu), agg: get0050(p2330.agg) };
+                
+                const get631 = (t0050) => {
+                    // 修正：00631 沒數字的問題可能來自這裡除以 0
+                    if (!baseData.tw0050 || !baseData.tw631) return 0;
+                    const impact = ((t0050 - baseData.tw0050)/baseData.tw0050) * 2; // 2x leverage
+                    return parseFloat((baseData.tw631 * (1 + impact)).toFixed(2));
+                };
+                const p631 = { con: get631(p0050.con), neu: get631(p0050.neu), agg: get631(p0050.agg) };
+
+                return { p2330, p0050, p631 };
+            }, [baseData, adrChangePct, tsmWeight]);
+
+            // --- Robust Fetching ---
+            const PROXY = "https://api.allorigins.win/get?url=";
+
+            // Investing.com 爬蟲
+            const fetchInvesting = async () => {
+                try {
+                    const url = PROXY + encodeURIComponent("https://www.investing.com/equities/taiwan-semicond.manufacturing-co?t=" + Date.now());
+                    const res = await fetch(url);
+                    const data = await res.json();
+                    const html = data.contents;
+                    
+                    const liveMatch = html.match(/data-test="instrument-price-last"[^>]*>([\d,.]+)</);
+                    const prevMatch = html.match(/data-test="prev-close-value"[^>]*>([\d,.]+)</);
+
+                    if (liveMatch && prevMatch) {
+                        return { 
+                            live: parseFloat(liveMatch[1].replace(/,/g, '')), 
+                            prev: parseFloat(prevMatch[1].replace(/,/g, '')),
+                            source: 'Investing' 
+                        };
+                    }
+                    return null;
+                } catch (e) { return null; }
+            };
+
+            // Yahoo 爬蟲 (修復 00631L 問題的核心)
+            const fetchYahoo = async (symbol) => {
+                try {
+                    // 抓取 5 天的 K 線，而不是只抓 header，這能保證找到最後一個有效收盤價
+                    const url = PROXY + encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d&_t=${Date.now()}`);
+                    const res = await fetch(url);
+                    const data = await res.json();
+                    const json = JSON.parse(data.contents);
+                    
+                    const result = json?.chart?.result?.[0];
+                    if (!result) return null;
+
+                    // 1. 嘗試抓 Meta 裡的 RegularMarketPrice (即時)
+                    let live = result.meta.regularMarketPrice;
+                    
+                    // 2. 嘗試抓 K 線裡的最後一個收盤價 (昨收)
+                    // 倒序遍歷，找到最後一個非 null 的值
+                    let prev = 0;
+                    const quotes = result.indicators.quote[0].close;
+                    for (let i = quotes.length - 1; i >= 0; i--) {
+                        if (quotes[i] !== null && quotes[i] !== undefined) {
+                            // 強制四捨五入到小數點第2位，解決 63.3500001 問題
+                            prev = parseFloat(quotes[i].toFixed(2));
+                            break;
+                        }
+                    }
+
+                    // 如果 meta 沒給 live (例如盤後)，暫時用 prev 代替，或者如果有 postMarketPrice 就用它
+                    if (!live) live = prev;
+
+                    return { live, prev };
+                } catch (e) { return null; }
+            };
+
+            const runSync = async () => {
+                setLoading(true);
+                setStatus("正在連線更新數據...");
+                
+                // 1. ADR Fetch
+                let adrData = await fetchInvesting();
+                if (!adrData) {
+                    setStatus("Investing 連線逾時，切換至 Yahoo...");
+                    adrData = await fetchYahoo("TSM");
+                }
+
+                // 2. TW Stocks Fetch (包含 00631L 修正)
+                const [tw2330, tw0050, tw631] = await Promise.all([
+                    fetchYahoo("2330.TW"),
+                    fetchYahoo("0050.TW"),
+                    fetchYahoo("00631L.TW")
+                ]);
+
+                // 3. FX Fetch
+                let fxVal = liveData.fx;
+                try {
+                    const res = await fetch("https://api.exchangerate-api.com/v4/latest/USD");
+                    const j = await res.json();
+                    if(j.rates.TWD) fxVal = j.rates.TWD;
+                } catch(e) {}
+
+                // Update & Sanitize (解決小數點問題)
+                if (adrData) {
+                    setBaseData({
+                        adr: parseFloat(adrData.prev.toFixed(2)),
+                        tw2330: tw2330 ? tw2330.prev : baseData.tw2330,
+                        tw0050: tw0050 ? tw0050.prev : baseData.tw0050,
+                        tw631: tw631 ? tw631.prev : baseData.tw631
+                    });
+                    setLiveData({ 
+                        adr: parseFloat(adrData.live.toFixed(2)), 
+                        fx: fxVal || 32.5 
+                    });
+                    setSource(adrData.source === 'Investing' ? 'Investing.com' : 'Yahoo Finance');
+                    setStatus(`更新成功 (${new Date().toLocaleTimeString()})`);
+                } else {
+                    setStatus("數據更新失敗，請檢查網路");
+                }
+                setLoading(false);
+            };
+
+            // Auto run on start
+            useEffect(() => { runSync(); }, []);
+
+            const fmt = (n) => new Intl.NumberFormat('zh-TW', { maximumFractionDigits: 2, minimumFractionDigits: 2 }).format(n);
+            const color = (v, base) => v > base ? 'text-up' : v < base ? 'text-down' : 'text-gray-400';
+
+            const displayLabels = {
+                tw2330: "2330 台積電",
+                tw0050: "0050 台灣50",
+                tw631: "00631L (正2)"
+            };
+
+            return (
+                <div className="min-h-screen p-4 md:p-8 max-w-5xl mx-auto">
+                    
+                    {/* Header */}
+                    <div className="flex flex-col md:flex-row justify-between items-center mb-6 pb-4 border-b border-gray-700 gap-4">
+                        <div>
+                            <h1 className="text-xl font-bold text-white flex gap-2 items-center">
+                                <i className="fa-solid fa-chart-simple text-blue-500"></i> 台積電 ADR 行情推算機
+                            </h1>
+                            <p className="text-xs text-gray-400 mt-1">V21 強力修復版</p>
+                        </div>
+                        <button onClick={runSync} disabled={loading} className="btn-refresh text-white px-8 py-2 rounded-lg font-bold shadow-lg flex items-center justify-center min-w-[160px]">
+                            {loading ? <><span className="spinner"></span> 處理中...</> : <><i className="fa-solid fa-arrows-rotate mr-2"></i> 同步數據</>}
+                        </button>
+                    </div>
+
+                    {/* Status Bar */}
+                    <div className="bg-slate-800/50 text-xs px-4 py-2 rounded mb-6 flex justify-between items-center border border-slate-700">
+                        <span className="text-blue-300"><i className="fa-solid fa-circle-info mr-2"></i>{status}</span>
+                        {source && <span className="bg-blue-900 text-blue-200 px-2 py-1 rounded">來源: {source}</span>}
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                        
+                        {/* Left Column: Inputs */}
+                        <div className="lg:col-span-5 space-y-5">
+                            {/* ADR Section */}
+                            <div className="glass-panel p-5 rounded-xl border-l-4 border-blue-500 relative overflow-hidden">
+                                <h3 className="text-white font-bold mb-4 border-b border-gray-700 pb-2">美股 ADR (TSM)</h3>
+                                <div className="grid grid-cols-2 gap-4 mb-4">
+                                    <div>
+                                        <label className="input-label">昨收基準</label>
+                                        <input type="number" className="input-field px-3 py-2 rounded text-right border-yellow-500" value={baseData.adr || ''} onChange={e => setBaseData({...baseData, adr: parseFloat(e.target.value)})}/>
+                                    </div>
+                                    <div>
+                                        <label className="input-label">最新現價</label>
+                                        <input type="number" className="input-field px-3 py-2 rounded text-right font-bold text-lg border-blue-500" value={liveData.adr || ''} onChange={e => setLiveData({...liveData, adr: parseFloat(e.target.value)})}/>
+                                    </div>
+                                </div>
+                                <div className="flex justify-between items-center bg-slate-900/50 p-3 rounded-lg border border-slate-700">
+                                    <div className="text-xs text-gray-400">漲跌幅</div>
+                                    <div className={`text-2xl font-bold ${adrChangePct >= 0 ? 'text-up' : 'text-down'}`}>
+                                        {adrChangePct > 0 ? '+' : ''}{fmt(adrChangePct)}%
+                                    </div>
+                                </div>
+                                <div className="mt-4">
+                                    <label className="input-label">匯率 (USD/TWD)</label>
+                                    <input type="number" className="input-field px-3 py-2 rounded text-yellow-400" value={liveData.fx || ''} onChange={e => setLiveData({...liveData, fx: parseFloat(e.target.value)})}/>
+                                </div>
+                            </div>
+
+                            {/* TW Section */}
+                            <div className="glass-panel p-5 rounded-xl border-l-4 border-green-500">
+                                <h3 className="text-white font-bold mb-4 border-b border-gray-700 pb-2">台股昨收基準</h3>
+                                <div className="space-y-3">
+                                    {['tw2330', 'tw0050', 'tw631'].map(k => (
+                                        <div key={k} className="flex justify-between items-center">
+                                            <label className="text-gray-300 text-sm">{displayLabels[k]}</label>
+                                            <input type="number" className="input-field w-28 px-2 py-1 rounded text-right text-gray-300" 
+                                                value={baseData[k] || ''} onChange={e => setBaseData({...baseData, [k]: parseFloat(e.target.value)})}/>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="mt-4 pt-4 border-t border-gray-700 flex items-center justify-between">
+                                    <span className="text-xs text-gray-500">0050 連動權重 {tsmWeight}%</span>
+                                    <input type="range" min="40" max="80" className="w-24 h-1 bg-gray-600 rounded-lg cursor-pointer" value={tsmWeight} onChange={e => setTsmWeight(e.target.value)}/>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Right Column: Results */}
+                        <div className="lg:col-span-7 space-y-5">
+                            {/* Dashboard */}
+                            <div className="grid grid-cols-2 gap-4">
+                                <div className="glass-panel p-4 rounded-xl text-center">
+                                    <div className="text-xs text-gray-400 uppercase tracking-wider">理論折算價</div>
+                                    <div className="text-3xl font-mono font-bold text-white mt-1">${fmt(parity)}</div>
+                                </div>
+                                <div className="glass-panel p-4 rounded-xl text-center border border-gray-600">
+                                    <div className="text-xs text-gray-400 uppercase tracking-wider">溢價率</div>
+                                    <div className={`text-3xl font-mono font-bold mt-1 ${premium > 0 ? 'text-yellow-400' : 'text-blue-400'}`}>{premium > 0 ? '+' : ''}{fmt(premium)}%</div>
+                                </div>
+                            </div>
+
+                            {/* Table */}
+                            <div className="glass-panel rounded-xl overflow-hidden border border-gray-700">
+                                <div className="bg-slate-800 px-6 py-3 border-b border-gray-700">
+                                    <h3 className="font-bold text-white text-sm uppercase tracking-wide">今日開盤預估</h3>
+                                </div>
+                                {predictions ? (
+                                    <table className="w-full text-left text-sm">
+                                        <thead>
+                                            <tr className="border-b border-gray-700 bg-slate-900/30 text-gray-400">
+                                                <th className="p-4 font-medium">情境</th>
+                                                <th className="p-4 font-medium">2330</th>
+                                                <th className="p-4 font-medium">0050</th>
+                                                <th className="p-4 font-medium">00631L</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-700/50">
+                                            <tr className="hover:bg-slate-800/30 transition">
+                                                <td className="p-4 text-gray-400 font-bold">保守 (60%)</td>
+                                                <td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.con, baseData.tw2330)}`}>{fmt(predictions.p2330.con)}</td>
+                                                <td className={`p-4 font-mono ${color(predictions.p0050.con, baseData.tw0050)}`}>{fmt(predictions.p0050.con)}</td>
+                                                <td className={`p-4 font-mono ${color(predictions.p631.con, baseData.tw631)}`}>{fmt(predictions.p631.con)}</td>
+                                            </tr>
+                                            <tr className="hover:bg-slate-800/30 transition bg-slate-800/20 border-l-4 border-l-blue-500">
+                                                <td className="p-4 text-blue-400 font-bold">中性 (80%)</td>
+                                                <td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.neu, baseData.tw2330)}`}>{fmt(predictions.p2330.neu)}</td>
+                                                <td className={`p-4 font-mono ${color(predictions.p0050.neu, baseData.tw0050)}`}>{fmt(predictions.p0050.neu)}</td>
+                                                <td className={`p-4 font-mono ${color(predictions.p631.neu, baseData.tw631)}`}>{fmt(predictions.p631.neu)}</td>
+                                            </tr>
+                                            <tr className="hover:bg-slate-800/30 transition">
+                                                <td className="p-4 text-red-400 font-bold">樂觀 (95%)</td>
+                                                <td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.agg, baseData.tw2330)}`}>{fmt(predictions.p2330.agg)}</td>
+                                                <td className={`p-4 font-mono ${color(predictions.p0050.agg, baseData.tw0050)}`}>{fmt(predictions.p0050.agg)}</td>
+                                                <td className={`p-4 font-mono ${color(predictions.p631.agg, baseData.tw631)}`}>{fmt(predictions.p631.agg)}</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                ) : (
+                                    <div className="p-10 text-center text-gray-500">等待數據同步中...</div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
