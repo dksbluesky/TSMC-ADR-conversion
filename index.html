@@ -3,18 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>📉台積電 ADR 行情推算機 (V25 邏輯校正版)</title>
+    <title>台積電 ADR 行情推算機 (V25 邏輯校正版)</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        body { background-color: #0f172a; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
-        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
-        .input-field { background: rgba(15, 23, 42, 0.8); border: 1px solid #334155; color: white; width: 100%; transition: all 0.2s; }
-        .input-field:focus { border-color: #3b82f6; outline: none; background: rgba(15, 23, 42, 1); }
-        .input-field.empty { color: #64748b; }
+        body { background-color: #f1f5f9; color: #1e293b; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+        .glass-panel { background: rgba(255, 255, 255, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(0, 0, 0, 0.08); }
+        .input-field { background: rgba(255, 255, 255, 0.9); border: 1px solid #cbd5e1; color: #1e293b; width: 100%; transition: all 0.2s; }
+        .input-field:focus { border-color: #3b82f6; outline: none; background: rgba(255, 255, 255, 1); }
+        .input-field.empty { color: #94a3b8; }
         .btn-live { background: linear-gradient(to right, #2563eb, #3b82f6); transition: all 0.2s; }
         .btn-live:hover { background: linear-gradient(to right, #1d4ed8, #2563eb); transform: translateY(-1px); }
         .spinner { display: inline-block; width: 0.8rem; height: 0.8rem; border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: #fff; animation: spin 1s infinite; margin-right: 0.4rem; }
@@ -37,9 +37,11 @@
 
         const App = () => {
             // State: 堅持不寫死任何數字，全靠抓取
-            const [baseData, setBaseData] = useState({ adr: 0, tw2330: 0, tw0050: 0, tw631: 0 });
+            const [baseData, setBaseData] = useState({ adr: 0, tw2330: 0, twB: 0, twC: 0 });
             const [liveData, setLiveData] = useState({ adr: 0, fx: 0 });
             const [tsmWeight, setTsmWeight] = useState(60);
+            const [tickers, setTickers] = useState({ b: "006208", c: "00878" });
+            const [leverageC, setLeverageC] = useState(1);
             
             // 系統狀態
             const [loading, setLoading] = useState(true);
@@ -123,11 +125,11 @@
                 
                 try {
                     // 並行抓取
-                    const [dAdr, d2330, d0050, d631] = await Promise.all([
+                    const [dAdr, d2330, dB, dC] = await Promise.all([
                         fetchWithFailover("TSM"),
                         fetchWithFailover("2330.TW"),
-                        fetchWithFailover("0050.TW"),
-                        fetchWithFailover("00631L.TW")
+                        fetchWithFailover(`${tickers.b}.TW`),
+                        fetchWithFailover(`${tickers.c}.TW`)
                     ]);
 
                     // 抓匯率
@@ -144,18 +146,18 @@
                     
                     if (dAdr) { updates.adr = dAdr; successCount++; }
                     if (d2330) { updates.tw2330 = d2330; successCount++; }
-                    if (d0050) { updates.tw0050 = d0050; successCount++; }
-                    if (d631) { updates.tw631 = d631; successCount++; }
+                    if (dB) { updates.twB = dB; successCount++; }
+                    if (dC) { updates.twC = dC; successCount++; }
 
                     // 更新 State
                     setBaseData(prev => ({
                         // ADR 基準仍需用 Prev (昨收)，才能算出漲跌幅
                         adr: updates.adr ? updates.adr.prev : prev.adr,
-                        
+
                         // 【關鍵修正】：台股基準改用 .live (最新收盤價)，因為這是預測下一個交易日的起點
                         tw2330: updates.tw2330 ? updates.tw2330.live : prev.tw2330,
-                        tw0050: updates.tw0050 ? updates.tw0050.live : prev.tw0050,
-                        tw631: updates.tw631 ? updates.tw631.live : prev.tw631
+                        twB: updates.twB ? updates.twB.live : prev.twB,
+                        twC: updates.twC ? updates.twC.live : prev.twC
                     }));
 
                     setLiveData(prev => ({
@@ -182,7 +184,7 @@
                 }
             };
 
-            useEffect(() => { runAutoSync(); }, []);
+            useEffect(() => { runAutoSync(); }, [tickers]);
 
             // --- 計算 (不變) ---
             const adrChangePct = useMemo(() => {
@@ -202,49 +204,49 @@
                     neu: getPrice(baseData.tw2330, adrChangePct * 0.8),
                     agg: getPrice(baseData.tw2330, adrChangePct * 0.95)
                 };
-                const get0050 = (t2330) => {
+                const getB = (t2330) => {
                     const impact = ((t2330 - baseData.tw2330)/baseData.tw2330) * 100 * (tsmWeight/100);
-                    return parseFloat((baseData.tw0050 * (1 + impact/100)).toFixed(2));
+                    return parseFloat((baseData.twB * (1 + impact/100)).toFixed(2));
                 };
-                const p0050 = { con: get0050(p2330.con), neu: get0050(p2330.neu), agg: get0050(p2330.agg) };
-                const get631 = (t0050) => {
-                    // 防止 0050 為 0 時除以 0
-                    if (!baseData.tw0050) return 0;
-                    const impact = ((t0050 - baseData.tw0050)/baseData.tw0050) * 2; 
-                    return parseFloat((baseData.tw631 * (1 + impact)).toFixed(2));
+                const pB = { con: getB(p2330.con), neu: getB(p2330.neu), agg: getB(p2330.agg) };
+                const getC = (tB) => {
+                    // 防止 B 為 0 時除以 0
+                    if (!baseData.twB) return 0;
+                    const impact = ((tB - baseData.twB)/baseData.twB) * leverageC;
+                    return parseFloat((baseData.twC * (1 + impact)).toFixed(2));
                 };
-                const p631 = { con: get631(p0050.con), neu: get631(p0050.neu), agg: get631(p0050.agg) };
-                return { p2330, p0050, p631 };
-            }, [baseData, adrChangePct, tsmWeight]);
+                const pC = { con: getC(pB.con), neu: getC(pB.neu), agg: getC(pB.agg) };
+                return { p2330, pB, pC };
+            }, [baseData, adrChangePct, tsmWeight, leverageC]);
 
             const fmt = (n) => n ? new Intl.NumberFormat('zh-TW', { maximumFractionDigits: 2, minimumFractionDigits: 2 }).format(n) : "---";
-            const color = (v, base) => v > base ? 'text-up' : v < base ? 'text-down' : 'text-gray-400';
+            const color = (v, base) => v > base ? 'text-up' : v < base ? 'text-down' : 'text-slate-500';
 
             return (
                 <div className="min-h-screen p-4 md:p-8 max-w-5xl mx-auto">
                     
-                    <div className="flex flex-col md:flex-row justify-between items-center mb-6 pb-4 border-b border-gray-700 gap-4">
+                    <div className="flex flex-col md:flex-row justify-between items-center mb-6 pb-4 border-b border-slate-300 gap-4">
                         <div>
-                            <h1 className="text-xl font-bold text-white flex gap-2 items-center">
+                            <h1 className="text-xl font-bold text-slate-900 flex gap-2 items-center">
                                 <i className="fa-solid fa-network-wired text-emerald-400"></i> 台積電 ADR 行情推算機
                             </h1>
-                            <p className="text-xs text-gray-400 mt-1">V25 邏輯校正版：正確對應最新收盤價</p>
+                            <p className="text-xs text-slate-500 mt-1">V25 邏輯校正版：正確對應最新收盤價</p>
                         </div>
                         <button onClick={runAutoSync} disabled={loading} className="btn-live text-white px-8 py-2 rounded-lg font-bold shadow-lg flex items-center justify-center min-w-[160px]">
                             {loading ? <><span className="spinner"></span> 搜尋中...</> : <><i className="fa-solid fa-rotate mr-2"></i> 強制重抓</>}
                         </button>
                     </div>
 
-                    <div className={`bg-slate-800/50 text-sm px-4 py-2 rounded mb-6 flex items-center border border-slate-700`}>
+                    <div className={`bg-slate-100 text-sm px-4 py-2 rounded mb-6 flex items-center border border-slate-300`}>
                         <span className={`status-dot ${statusColor}`}></span>
-                        <span className="text-blue-100">{statusMsg}</span>
+                        <span className="text-slate-700">{statusMsg}</span>
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                         
                         <div className="lg:col-span-5 space-y-5">
                             <div className="glass-panel p-5 rounded-xl border-l-4 border-blue-500 relative">
-                                <h3 className="text-white font-bold mb-4">美股 ADR (TSM)</h3>
+                                <h3 className="text-slate-900 font-bold mb-4">美股 ADR (TSM)</h3>
                                 <div className="grid grid-cols-2 gap-4 mb-4">
                                     <div>
                                         <label className="input-label">昨收基準 (分母)</label>
@@ -255,46 +257,53 @@
                                         <input type="number" className={`input-field px-3 py-2 rounded text-right font-bold text-lg border-blue-500 ${!liveData.adr && 'empty'}`} placeholder="等待..." value={liveData.adr || ''} onChange={e => setLiveData({...liveData, adr: parseFloat(e.target.value)})}/>
                                     </div>
                                 </div>
-                                <div className="flex justify-between items-center bg-slate-900/50 p-3 rounded-lg border border-slate-700">
-                                    <div className="text-xs text-gray-400">即時漲跌幅</div>
+                                <div className="flex justify-between items-center bg-slate-100 p-3 rounded-lg border border-slate-300">
+                                    <div className="text-xs text-slate-500">即時漲跌幅</div>
                                     <div className={`text-2xl font-bold ${adrChangePct >= 0 ? 'text-up' : 'text-down'}`}>{adrChangePct > 0 ? '+' : ''}{fmt(adrChangePct)}%</div>
                                 </div>
                                 <div className="mt-4"><label className="input-label">匯率 (USD/TWD)</label><input type="number" className="input-field px-3 py-2 rounded text-yellow-400" value={liveData.fx || ''} onChange={e => setLiveData({...liveData, fx: parseFloat(e.target.value)})}/></div>
                             </div>
 
                             <div className="glass-panel p-5 rounded-xl border-l-4 border-green-500">
-                                <h3 className="text-white font-bold mb-4">台股最新收盤 (預測基準)</h3>
+                                <h3 className="text-slate-900 font-bold mb-4">台股最新收盤 (預測基準)</h3>
                                 <div className="space-y-3">
-                                    {['tw2330', 'tw0050', 'tw631'].map(k => (
-                                        <div key={k} className="flex justify-between items-center">
-                                            <label className="text-gray-300 text-sm">{k.replace('tw', '')} {k==='tw631'?'正2':(k==='tw2330'?'台積電':'台灣50')}</label>
-                                            <input type="number" className={`input-field w-28 px-2 py-1 rounded text-right text-gray-300 ${!baseData[k] && 'empty'}`} placeholder="等待..." value={baseData[k] || ''} onChange={e => setBaseData({...baseData, [k]: parseFloat(e.target.value)})}/>
-                                        </div>
-                                    ))}
+                                    <div className="flex justify-between items-center">
+                                        <label className="text-slate-600 text-sm">2330 台積電</label>
+                                        <input type="number" className={`input-field w-28 px-2 py-1 rounded text-right text-slate-600 ${!baseData.tw2330 && 'empty'}`} placeholder="等待..." value={baseData.tw2330 || ''} onChange={e => setBaseData({...baseData, tw2330: parseFloat(e.target.value)})}/>
+                                    </div>
+                                    <div className="flex justify-between items-center">
+                                        <input type="text" className="input-field w-20 px-2 py-1 rounded text-xs text-slate-600" value={tickers.b} onChange={e => setTickers({...tickers, b: e.target.value.trim()})}/>
+                                        <input type="number" className={`input-field w-28 px-2 py-1 rounded text-right text-slate-600 ${!baseData.twB && 'empty'}`} placeholder="等待..." value={baseData.twB || ''} onChange={e => setBaseData({...baseData, twB: parseFloat(e.target.value)})}/>
+                                    </div>
+                                    <div className="flex justify-between items-center">
+                                        <input type="text" className="input-field w-20 px-2 py-1 rounded text-xs text-slate-600" value={tickers.c} onChange={e => setTickers({...tickers, c: e.target.value.trim()})}/>
+                                        <input type="number" className={`input-field w-28 px-2 py-1 rounded text-right text-slate-600 ${!baseData.twC && 'empty'}`} placeholder="等待..." value={baseData.twC || ''} onChange={e => setBaseData({...baseData, twC: parseFloat(e.target.value)})}/>
+                                    </div>
                                 </div>
-                                <div className="mt-4 pt-4 border-t border-gray-700 flex items-center justify-between"><span className="text-xs text-gray-500">權重參數 {tsmWeight}%</span><input type="range" min="40" max="80" className="w-24 h-1 bg-gray-600 rounded-lg cursor-pointer" value={tsmWeight} onChange={e => setTsmWeight(e.target.value)}/></div>
+                                <div className="mt-4 pt-4 border-t border-slate-300 flex items-center justify-between"><span className="text-xs text-slate-400">權重參數 {tsmWeight}%</span><input type="range" min="40" max="80" className="w-24 h-1 bg-slate-300 rounded-lg cursor-pointer" value={tsmWeight} onChange={e => setTsmWeight(e.target.value)}/></div>
+                                <div className="mt-3 flex items-center justify-between"><span className="text-xs text-slate-400">{tickers.c} 槓桿倍數 (1=現股, 2=正2)</span><input type="number" step="0.5" className="input-field w-16 px-2 py-1 rounded text-right text-slate-600" value={leverageC} onChange={e => setLeverageC(parseFloat(e.target.value) || 0)}/></div>
                             </div>
                         </div>
 
                         <div className="lg:col-span-7 space-y-5">
                             <div className="grid grid-cols-2 gap-4">
-                                <div className="glass-panel p-4 rounded-xl text-center"><div className="text-xs text-gray-400 uppercase tracking-wider">理論折算價</div><div className="text-3xl font-mono font-bold text-white mt-1">{loading ? "..." : `$${fmt(parity)}`}</div></div>
-                                <div className="glass-panel p-4 rounded-xl text-center border border-gray-600"><div className="text-xs text-gray-400 uppercase tracking-wider">溢價率</div><div className={`text-3xl font-mono font-bold mt-1 ${premium > 0 ? 'text-yellow-400' : 'text-blue-400'}`}>{loading ? "..." : `${premium > 0 ? '+' : ''}${fmt(premium)}%`}</div></div>
+                                <div className="glass-panel p-4 rounded-xl text-center"><div className="text-xs text-slate-500 uppercase tracking-wider">理論折算價</div><div className="text-3xl font-mono font-bold text-slate-900 mt-1">{loading ? "..." : `$${fmt(parity)}`}</div></div>
+                                <div className="glass-panel p-4 rounded-xl text-center border border-slate-300"><div className="text-xs text-slate-500 uppercase tracking-wider">溢價率</div><div className={`text-3xl font-mono font-bold mt-1 ${premium > 0 ? 'text-yellow-400' : 'text-blue-400'}`}>{loading ? "..." : `${premium > 0 ? '+' : ''}${fmt(premium)}%`}</div></div>
                             </div>
 
-                            <div className="glass-panel rounded-xl overflow-hidden border border-gray-700">
-                                <div className="bg-slate-800 px-6 py-3 border-b border-gray-700"><h3 className="font-bold text-white text-sm uppercase tracking-wide">今日開盤預估</h3></div>
+                            <div className="glass-panel rounded-xl overflow-hidden border border-slate-300">
+                                <div className="bg-slate-100 px-6 py-3 border-b border-slate-300"><h3 className="font-bold text-slate-900 text-sm uppercase tracking-wide">今日開盤預估</h3></div>
                                 {predictions && baseData.tw2330 > 0 ? (
                                     <table className="w-full text-left text-sm">
-                                        <thead><tr className="border-b border-gray-700 bg-slate-900/30 text-gray-400"><th className="p-4 font-medium">情境</th><th className="p-4 font-medium">2330</th><th className="p-4 font-medium">0050</th><th className="p-4 font-medium">00631L</th></tr></thead>
+                                        <thead><tr className="border-b border-slate-300 bg-slate-100 text-slate-500"><th className="p-4 font-medium">情境</th><th className="p-4 font-medium">2330</th><th className="p-4 font-medium">{tickers.b}</th><th className="p-4 font-medium">{tickers.c}</th></tr></thead>
                                         <tbody className="divide-y divide-gray-700/50">
-                                            <tr className="hover:bg-slate-800/30 transition"><td className="p-4 text-gray-400 font-bold">保守 (60%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.con, baseData.tw2330)}`}>{fmt(predictions.p2330.con)}</td><td className={`p-4 font-mono ${color(predictions.p0050.con, baseData.tw0050)}`}>{fmt(predictions.p0050.con)}</td><td className={`p-4 font-mono ${color(predictions.p631.con, baseData.tw631)}`}>{fmt(predictions.p631.con)}</td></tr>
-                                            <tr className="hover:bg-slate-800/30 transition bg-slate-800/20 border-l-4 border-l-blue-500"><td className="p-4 text-blue-400 font-bold">中性 (80%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.neu, baseData.tw2330)}`}>{fmt(predictions.p2330.neu)}</td><td className={`p-4 font-mono ${color(predictions.p0050.neu, baseData.tw0050)}`}>{fmt(predictions.p0050.neu)}</td><td className={`p-4 font-mono ${color(predictions.p631.neu, baseData.tw631)}`}>{fmt(predictions.p631.neu)}</td></tr>
-                                            <tr className="hover:bg-slate-800/30 transition"><td className="p-4 text-red-400 font-bold">樂觀 (95%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.agg, baseData.tw2330)}`}>{fmt(predictions.p2330.agg)}</td><td className={`p-4 font-mono ${color(predictions.p0050.agg, baseData.tw0050)}`}>{fmt(predictions.p0050.agg)}</td><td className={`p-4 font-mono ${color(predictions.p631.agg, baseData.tw631)}`}>{fmt(predictions.p631.agg)}</td></tr>
+                                            <tr className="hover:bg-slate-100 transition"><td className="p-4 text-slate-500 font-bold">保守 (60%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.con, baseData.tw2330)}`}>{fmt(predictions.p2330.con)}</td><td className={`p-4 font-mono ${color(predictions.pB.con, baseData.twB)}`}>{fmt(predictions.pB.con)}</td><td className={`p-4 font-mono ${color(predictions.pC.con, baseData.twC)}`}>{fmt(predictions.pC.con)}</td></tr>
+                                            <tr className="hover:bg-slate-100 transition bg-slate-50 border-l-4 border-l-blue-500"><td className="p-4 text-blue-400 font-bold">中性 (80%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.neu, baseData.tw2330)}`}>{fmt(predictions.p2330.neu)}</td><td className={`p-4 font-mono ${color(predictions.pB.neu, baseData.twB)}`}>{fmt(predictions.pB.neu)}</td><td className={`p-4 font-mono ${color(predictions.pC.neu, baseData.twC)}`}>{fmt(predictions.pC.neu)}</td></tr>
+                                            <tr className="hover:bg-slate-100 transition"><td className="p-4 text-red-400 font-bold">樂觀 (95%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.agg, baseData.tw2330)}`}>{fmt(predictions.p2330.agg)}</td><td className={`p-4 font-mono ${color(predictions.pB.agg, baseData.twB)}`}>{fmt(predictions.pB.agg)}</td><td className={`p-4 font-mono ${color(predictions.pC.agg, baseData.twC)}`}>{fmt(predictions.pC.agg)}</td></tr>
                                         </tbody>
                                     </table>
                                 ) : (
-                                    <div className="p-10 text-center text-gray-500">{loading ? "數據搜尋中，請稍候..." : "等待數據 (請確認網路或手動輸入)"}</div>
+                                    <div className="p-10 text-center text-slate-400">{loading ? "數據搜尋中，請稍候..." : "等待數據 (請確認網路或手動輸入)"}</div>
                                 )}
                             </div>
                         </div>
