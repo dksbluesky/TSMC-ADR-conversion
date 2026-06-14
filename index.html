@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>📊 台積電 ADR 行情推算機 (V26 終極校正版)</title>
+    <title>📊 台積電 ADR 行情推算機 (V26.1 RWD優化版)</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -47,7 +47,7 @@
             const [lastUpdated, setLastUpdated] = useState(null);
             const [statusColor, setStatusColor] = useState("status-yellow");
 
-            // --- 核心修正：無視 Yahoo 錯誤 Meta，用歷史 K 棒嚴格倒推時間軸 ---
+            // --- 核心：無視 Yahoo 錯誤 Meta，用歷史 K 棒嚴格倒推時間軸 ---
             const extractPrices = (json) => {
                 try {
                     const result = json?.chart?.result?.[0];
@@ -57,7 +57,6 @@
                     const quotes = result.indicators.quote[0].close;
                     const timestamps = result.timestamp;
                     
-                    // 建立結構化歷史數據陣列
                     const validData = [];
                     if (quotes && timestamps) {
                         for (let i = 0; i < quotes.length; i++) {
@@ -73,10 +72,8 @@
 
                     if (validData.length === 0) return null;
 
-                    // 1. 【分子：最新交易日現價/收盤】永遠拿最後一根 K 棒
                     const livePrice = validData[validData.length - 1].price;
 
-                    // 2. 【分母：昨收基準】永遠拿倒數第二根 K 棒 (完美避開 Yahoo 週末 Meta 飄移錯誤)
                     let prevPrice = null;
                     if (validData.length > 1) {
                         prevPrice = validData[validData.length - 2].price;
@@ -96,7 +93,7 @@
                 }
             };
 
-            // --- 核心：多重路徑代理解析 (優化線路切換，防止 CORS 阻擋) ---
+            // --- 核心：多重路徑代理解析 ---
             const fetchWithFailover = async (symbol) => {
                 const timestamp = Date.now();
                 const rawUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d&_t=${timestamp}`;
@@ -110,9 +107,8 @@
 
                 for (let proxy of proxies) {
                     try {
-                        console.log(`正在透過 [${proxy.name}] 請求標的: ${symbol}`);
                         const res = await fetch(proxy.url);
-                        if (!res.ok) throw new Error(`HTTP 錯誤狀態碼: ${res.status}`);
+                        if (!res.ok) throw new Error(`HTTP 錯誤: ${res.status}`);
                         
                         let json;
                         if (proxy.url.includes("allorigins")) {
@@ -123,16 +119,12 @@
                         }
 
                         const prices = extractPrices(json);
-                        if (prices) {
-                            console.log(`✅ [${proxy.name}] 成功獲取並解析標的: ${symbol}`);
-                            return prices; // 成功拿到就立刻回傳
-                        }
+                        if (prices) return prices;
                     } catch (err) {
-                        console.warn(`❌ [${proxy.name}] 請求失敗或遭遇阻擋，自動切換下一條線路。錯誤:`, err.message);
-                        continue; // 失敗則自動進入下一條代理線路
+                        continue;
                     }
                 }
-                return null; // 三條線路皆宣告失敗
+                return null;
             };
 
             const runAutoSync = async () => {
@@ -181,7 +173,7 @@
                         setStatusMsg("所有數據同步且校正回歸成功");
                         setStatusColor("status-green");
                     } else if (successCount > 0) {
-                        setStatusMsg(`部分數據同步成功 (${successCount}/4)，請注意缺漏項`);
+                        setStatusMsg(`部分數據同步成功 (${successCount}/4)`);
                         setStatusColor("status-yellow");
                     } else {
                         setStatusMsg("跨域連線受阻，請手動輸入數值");
@@ -242,7 +234,7 @@
                             <h1 className="text-xl font-bold text-slate-900 flex gap-2 items-center">
                                 <i className="fa-solid fa-network-wired text-emerald-400"></i> 台積電 ADR 行情推算機
                             </h1>
-                            <p className="text-xs text-slate-500 mt-1">V26 終極校正版</p>
+                            <p className="text-xs text-slate-500 mt-1">V26.1 終極校正版：正確對應最新收盤價</p>
                         </div>
                         <button onClick={runAutoSync} disabled={loading} className="btn-live text-white px-8 py-2 rounded-lg font-bold shadow-lg flex items-center justify-center min-w-[160px]">
                             {loading ? <><span className="spinner"></span> 搜尋中...</> : <><i className="fa-solid fa-rotate mr-2"></i> 強制重抓</>}
@@ -299,9 +291,20 @@
                         </div>
 
                         <div className="lg:col-span-7 space-y-5">
+                            {/* RWD 欄位優化：調整手機板大小防止破圖溢出 */}
                             <div className="grid grid-cols-2 gap-4">
-                                <div className="glass-panel p-4 rounded-xl text-center"><div className="text-xs text-slate-500 uppercase tracking-wider">理論折算價</div><div className="text-3xl font-mono font-bold text-slate-900 mt-1">{loading ? "..." : `$${fmt(parity)}`}</div></div>
-                                <div className="glass-panel p-4 rounded-xl text-center border border-slate-300"><div className="text-xs text-slate-500 uppercase tracking-wider">溢價率</div><div className={`text-3xl font-mono font-bold mt-1 ${premium > 0 ? 'text-yellow-400' : 'text-blue-400'}`}>{loading ? "..." : `${premium > 0 ? '+' : ''}${fmt(premium)}%`}</div></div>
+                                <div className="glass-panel p-4 rounded-xl text-center flex flex-col justify-center min-h-[96px]">
+                                    <div className="text-xs text-slate-500 uppercase tracking-wider">理論折算價</div>
+                                    <div className="text-xl sm:text-2xl md:text-3xl font-mono font-bold text-slate-900 mt-1 truncate px-1">
+                                        {loading ? "..." : `$${fmt(parity)}`}
+                                    </div>
+                                </div>
+                                <div className="glass-panel p-4 rounded-xl text-center border border-slate-300 flex flex-col justify-center min-h-[96px]">
+                                    <div className="text-xs text-slate-500 uppercase tracking-wider">溢價率</div>
+                                    <div className={`text-xl sm:text-2xl md:text-3xl font-mono font-bold mt-1 truncate px-1 ${premium > 0 ? 'text-yellow-400' : 'text-blue-400'}`}>
+                                        {loading ? "..." : `${premium > 0 ? '+' : ''}${fmt(premium)}%`}
+                                    </div>
+                                </div>
                             </div>
 
                             <div className="glass-panel rounded-xl overflow-hidden border border-slate-300">
