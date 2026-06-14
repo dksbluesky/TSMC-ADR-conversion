@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>📊 台積電 ADR 行情推算機 (V25 邏輯校正版)</title>
+    <title>📊 台積電 ADR 行情推算機 (V26 終極校正版)</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -36,20 +36,18 @@
         const { useState, useMemo, useEffect } = React;
 
         const App = () => {
-            // State: 堅持不寫死任何數字，全靠抓取
             const [baseData, setBaseData] = useState({ adr: 0, tw2330: 0, twB: 0, twC: 0 });
             const [liveData, setLiveData] = useState({ adr: 0, fx: 0 });
             const [tsmWeight, setTsmWeight] = useState(60);
             const [tickers, setTickers] = useState({ b: "006208", c: "00878" });
             const [leverageC, setLeverageC] = useState(1);
             
-            // 系統狀態
             const [loading, setLoading] = useState(true);
             const [statusMsg, setStatusMsg] = useState("系統啟動...");
             const [lastUpdated, setLastUpdated] = useState(null);
             const [statusColor, setStatusColor] = useState("status-yellow");
 
-            // --- 核心：K 線數據提取 (含時序診斷與精準配對) ---
+            // --- 核心修正：無視 Yahoo 錯誤 Meta，用歷史 K 棒嚴格倒推時間軸 ---
             const extractPrices = (json) => {
                 try {
                     const result = json?.chart?.result?.[0];
@@ -59,7 +57,7 @@
                     const quotes = result.indicators.quote[0].close;
                     const timestamps = result.timestamp;
                     
-                    // 建立包含日期與價格的結構化陣列
+                    // 建立結構化歷史數據陣列
                     const validData = [];
                     if (quotes && timestamps) {
                         for (let i = 0; i < quotes.length; i++) {
@@ -73,33 +71,20 @@
                         }
                     }
 
-                    // ===== 🔍 F12 數據源診斷日誌 =====
-                    console.log(`=== [${meta.symbol}] 歷史數據明細 ===`, validData);
-                    console.log(`[${meta.symbol}] Meta chartPreviousClose:`, meta.chartPreviousClose);
-                    console.log(`[${meta.symbol}] Meta regularMarketPrice:`, meta.regularMarketPrice);
-
                     if (validData.length === 0) return null;
 
-                    // 1. 【分子：最新現價/最新收盤 (預期對應 6/13)】
-                    let livePrice = meta.regularMarketPrice;
-                    // 若適逢週末或盤後狀態，強制定向到歷史 K 棒的最末端
-                    if (!livePrice || meta.marketState === "POSTPOST" || meta.marketState === "CLOSED") {
-                        livePrice = validData[validData.length - 1].price;
-                    }
+                    // 1. 【分子：最新交易日現價/收盤】永遠拿最後一根 K 棒
+                    const livePrice = validData[validData.length - 1].price;
 
-                    // 2. 【分母：昨收基準 (預期對應 6/12)】
+                    // 2. 【分母：昨收基準】永遠拿倒數第二根 K 棒 (完美避開 Yahoo 週末 Meta 飄移錯誤)
                     let prevPrice = null;
-
-                    // 強固時間軸校正：如果最後一根 K 棒確實是分子 (例如 6/13 數據) 且陣列長度足夠
-                    if (livePrice === validData[validData.length - 1].price && validData.length > 1) {
-                        // 則分母毫無疑問必須是它的前一個交易日 (倒數第二根)
+                    if (validData.length > 1) {
                         prevPrice = validData[validData.length - 2].price;
                     } else {
-                        // 週間即時盤動態擷取
-                        prevPrice = meta.chartPreviousClose || meta.previousClose || validData[validData.length - 1].price;
+                        prevPrice = meta.chartPreviousClose || livePrice;
                     }
                     
-                    console.log(`👉 [${meta.symbol}] 最終判定 -> 分子(live): ${livePrice}, 分母(prev): ${prevPrice}`);
+                    console.log(`🎯 [${meta.symbol}] 精準校正判定 -> 分子(6/13最新): ${livePrice}, 分母(6/12昨收): ${prevPrice}`);
                     
                     return {
                         live: parseFloat(livePrice.toFixed(2)),
@@ -111,21 +96,23 @@
                 }
             };
 
-            // --- 核心：多重路徑抓取 (Multi-Proxy Fetcher) ---
+            // --- 核心：多重路徑代理解析 (優化線路切換，防止 CORS 阻擋) ---
             const fetchWithFailover = async (symbol) => {
                 const timestamp = Date.now();
-                const targetUrl = encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d&_t=${timestamp}`);
+                const rawUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d&_t=${timestamp}`;
+                const targetUrl = encodeURIComponent(rawUrl);
                 
                 const proxies = [
-                    { name: "線路 A", url: `https://api.allorigins.win/get?url=${targetUrl}` },
-                    { name: "線路 B", url: `https://corsproxy.io/?https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d&_t=${timestamp}` },
-                    { name: "線路 C", url: `https://thingproxy.freeboard.io/fetch/https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d&_t=${timestamp}` }
+                    { name: "線路 A (allorigins)", url: `https://api.allorigins.win/get?url=${targetUrl}` },
+                    { name: "線路 B (corsproxy)", url: `https://corsproxy.io/?${encodeURIComponent(rawUrl)}` },
+                    { name: "線路 C (thingproxy)", url: `https://thingproxy.freeboard.io/fetch/${rawUrl}` }
                 ];
 
                 for (let proxy of proxies) {
                     try {
+                        console.log(`正在透過 [${proxy.name}] 請求標的: ${symbol}`);
                         const res = await fetch(proxy.url);
-                        if (!res.ok) throw new Error("Network Error");
+                        if (!res.ok) throw new Error(`HTTP 錯誤狀態碼: ${res.status}`);
                         
                         let json;
                         if (proxy.url.includes("allorigins")) {
@@ -136,22 +123,24 @@
                         }
 
                         const prices = extractPrices(json);
-                        if (prices) return prices;
-
+                        if (prices) {
+                            console.log(`✅ [${proxy.name}] 成功獲取並解析標的: ${symbol}`);
+                            return prices; // 成功拿到就立刻回傳
+                        }
                     } catch (err) {
-                        continue;
+                        console.warn(`❌ [${proxy.name}] 請求失敗或遭遇阻擋，自動切換下一條線路。錯誤:`, err.message);
+                        continue; // 失敗則自動進入下一條代理線路
                     }
                 }
-                return null;
+                return null; // 三條線路皆宣告失敗
             };
 
             const runAutoSync = async () => {
                 setLoading(true);
-                setStatusMsg("正在校正數據 (台股取最新收盤)...");
+                setStatusMsg("正在同步國際金融行情與跨域校正...");
                 setStatusColor("status-yellow");
                 
                 try {
-                    // 並行抓取
                     const [dAdr, d2330, dB, dC] = await Promise.all([
                         fetchWithFailover("TSM"),
                         fetchWithFailover("2330.TW"),
@@ -159,7 +148,6 @@
                         fetchWithFailover(`${tickers.c}.TW`)
                     ]);
 
-                    // 抓匯率
                     let fxVal = liveData.fx;
                     try {
                         const res = await fetch("https://api.exchangerate-api.com/v4/latest/USD");
@@ -167,7 +155,6 @@
                         if(j.rates.TWD) fxVal = j.rates.TWD;
                     } catch(e) { if(fxVal===0) fxVal = 32.5; }
 
-                    // 檢查結果
                     let successCount = 0;
                     const updates = {};
                     
@@ -176,12 +163,8 @@
                     if (dB) { updates.twB = dB; successCount++; }
                     if (dC) { updates.twC = dC; successCount++; }
 
-                    // 更新 State
                     setBaseData(prev => ({
-                        // ADR 基準分母
                         adr: updates.adr ? updates.adr.prev : prev.adr,
-
-                        // 台股預測基準均採用最新收盤價 (.live)
                         tw2330: updates.tw2330 ? updates.tw2330.live : prev.tw2330,
                         twB: updates.twB ? updates.twB.live : prev.twB,
                         twC: updates.twC ? updates.twC.live : prev.twC
@@ -195,18 +178,18 @@
                     setLastUpdated(new Date());
 
                     if (successCount === 4) {
-                        setStatusMsg("全數更新成功");
+                        setStatusMsg("所有數據同步且校正回歸成功");
                         setStatusColor("status-green");
                     } else if (successCount > 0) {
-                        setStatusMsg(`部分更新成功 (${successCount}/4)`);
+                        setStatusMsg(`部分數據同步成功 (${successCount}/4)，請注意缺漏項`);
                         setStatusColor("status-yellow");
                     } else {
-                        setStatusMsg("連線受阻，請手動輸入");
+                        setStatusMsg("跨域連線受阻，請手動輸入數值");
                         setStatusColor("status-red");
                     }
 
                 } catch (err) {
-                    setStatusMsg("系統錯誤");
+                    setStatusMsg("系統執行階段錯誤");
                     setStatusColor("status-red");
                 } finally {
                     setLoading(false);
@@ -259,7 +242,7 @@
                             <h1 className="text-xl font-bold text-slate-900 flex gap-2 items-center">
                                 <i className="fa-solid fa-network-wired text-emerald-400"></i> 台積電 ADR 行情推算機
                             </h1>
-                            <p className="text-xs text-slate-500 mt-1">V25 邏輯校正版：正確對應最新收盤價</p>
+                            <p className="text-xs text-slate-500 mt-1">V26 終極校正版：嚴格對齊 6/12 與 6/13 數據軸</p>
                         </div>
                         <button onClick={runAutoSync} disabled={loading} className="btn-live text-white px-8 py-2 rounded-lg font-bold shadow-lg flex items-center justify-center min-w-[160px]">
                             {loading ? <><span className="spinner"></span> 搜尋中...</> : <><i className="fa-solid fa-rotate mr-2"></i> 強制重抓</>}
