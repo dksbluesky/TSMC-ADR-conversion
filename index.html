@@ -46,6 +46,7 @@
             // 系統狀態
             const [loading, setLoading] = useState(true);
             const [statusMsg, setStatusMsg] = useState("系統啟動...");
+            const [lastUpdated, setLastUpdated] = useState(null);
             const [statusColor, setStatusColor] = useState("status-yellow");
 
             // --- 核心：K 線數據提取 (防空值) ---
@@ -165,6 +166,8 @@
                         fx: fxVal
                     }));
 
+                    setLastUpdated(new Date());
+
                     if (successCount === 4) {
                         setStatusMsg("全數更新成功");
                         setStatusColor("status-green");
@@ -240,6 +243,7 @@
                     <div className={`bg-slate-100 text-sm px-4 py-2 rounded mb-6 flex items-center border border-slate-300`}>
                         <span className={`status-dot ${statusColor}`}></span>
                         <span className="text-slate-700">{statusMsg}</span>
+                        {lastUpdated && <span className="text-slate-400 text-xs ml-2">(更新於 {lastUpdated.toLocaleTimeString('zh-TW')})</span>}
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
