@@ -49,7 +49,7 @@
             const [lastUpdated, setLastUpdated] = useState(null);
             const [statusColor, setStatusColor] = useState("status-yellow");
 
-            // --- 核心：K 線數據提取 (防空值) ---
+            // --- 核心：K 線數據提取 (含時序診斷與精準配對) ---
             const extractPrices = (json) => {
                 try {
                     const result = json?.chart?.result?.[0];
@@ -57,33 +57,58 @@
 
                     const meta = result.meta;
                     const quotes = result.indicators.quote[0].close;
+                    const timestamps = result.timestamp;
                     
-                    // 過濾無效數據
-                    const validCloses = quotes.filter(c => c !== null && c !== undefined);
-                    if (validCloses.length === 0) return null;
-
-                    // 1. 抓現價/最新收盤 (Live) -> 這是台股要用的基準 (例如 1585)
-                    // 2. 抓昨收 (Prev) -> 這是 ADR 計算漲跌幅用的分母
-                    // 收盤/盤後時，chartPreviousClose 可能已經被 Yahoo 更新成「下一個交易日的昨收」，
-                    // 導致分子分母指向同一天。此時改用 K 線陣列，確保兩者是相鄰交易日。
-                    const isClosed = meta.marketState === "POSTPOST" || meta.marketState === "CLOSED" || !meta.regularMarketPrice;
-
-                    let livePrice, prevPrice;
-                    if (isClosed) {
-                        livePrice = validCloses[validCloses.length - 1];
-                        prevPrice = validCloses.length > 1
-                            ? validCloses[validCloses.length - 2]
-                            : (meta.chartPreviousClose || livePrice);
-                    } else {
-                        livePrice = meta.regularMarketPrice;
-                        prevPrice = meta.chartPreviousClose || meta.previousClose || validCloses[validCloses.length - 1];
+                    // 建立包含日期與價格的結構化陣列
+                    const validData = [];
+                    if (quotes && timestamps) {
+                        for (let i = 0; i < quotes.length; i++) {
+                            if (quotes[i] !== null && quotes[i] !== undefined) {
+                                validData.push({
+                                    timestamp: timestamps[i],
+                                    dateStr: new Date(timestamps[i] * 1000).toLocaleDateString('zh-TW'),
+                                    price: quotes[i]
+                                });
+                            }
+                        }
                     }
+
+                    // ===== 🔍 F12 數據源診斷日誌 =====
+                    console.log(`=== [${meta.symbol}] 歷史數據明細 ===`, validData);
+                    console.log(`[${meta.symbol}] Meta chartPreviousClose:`, meta.chartPreviousClose);
+                    console.log(`[${meta.symbol}] Meta regularMarketPrice:`, meta.regularMarketPrice);
+
+                    if (validData.length === 0) return null;
+
+                    // 1. 【分子：最新現價/最新收盤 (預期對應 6/13)】
+                    let livePrice = meta.regularMarketPrice;
+                    // 若適逢週末或盤後狀態，強制定向到歷史 K 棒的最末端
+                    if (!livePrice || meta.marketState === "POSTPOST" || meta.marketState === "CLOSED") {
+                        livePrice = validData[validData.length - 1].price;
+                    }
+
+                    // 2. 【分母：昨收基準 (預期對應 6/12)】
+                    let prevPrice = null;
+
+                    // 強固時間軸校正：如果最後一根 K 棒確實是分子 (例如 6/13 數據) 且陣列長度足夠
+                    if (livePrice === validData[validData.length - 1].price && validData.length > 1) {
+                        // 則分母毫無疑問必須是它的前一個交易日 (倒數第二根)
+                        prevPrice = validData[validData.length - 2].price;
+                    } else {
+                        // 週間即時盤動態擷取
+                        prevPrice = meta.chartPreviousClose || meta.previousClose || validData[validData.length - 1].price;
+                    }
+                    
+                    console.log(`👉 [${meta.symbol}] 最終判定 -> 分子(live): ${livePrice}, 分母(prev): ${prevPrice}`);
                     
                     return {
                         live: parseFloat(livePrice.toFixed(2)),
                         prev: parseFloat(prevPrice.toFixed(2))
                     };
-                } catch (e) { return null; }
+                } catch (e) { 
+                    console.error("數據解析錯誤:", e);
+                    return null; 
+                }
             };
 
             // --- 核心：多重路徑抓取 (Multi-Proxy Fetcher) ---
@@ -91,7 +116,6 @@
                 const timestamp = Date.now();
                 const targetUrl = encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d&_t=${timestamp}`);
                 
-                // 定義三條路徑
                 const proxies = [
                     { name: "線路 A", url: `https://api.allorigins.win/get?url=${targetUrl}` },
                     { name: "線路 B", url: `https://corsproxy.io/?https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=5d&_t=${timestamp}` },
@@ -112,13 +136,13 @@
                         }
 
                         const prices = extractPrices(json);
-                        if (prices) return prices; // 成功抓到數據就回傳
+                        if (prices) return prices;
 
                     } catch (err) {
                         continue;
                     }
                 }
-                return null; // 全部失敗
+                return null;
             };
 
             const runAutoSync = async () => {
@@ -154,10 +178,10 @@
 
                     // 更新 State
                     setBaseData(prev => ({
-                        // ADR 基準仍需用 Prev (昨收)，才能算出漲跌幅
+                        // ADR 基準分母
                         adr: updates.adr ? updates.adr.prev : prev.adr,
 
-                        // 【關鍵修正】：台股基準改用 .live (最新收盤價)，因為這是預測下一個交易日的起點
+                        // 台股預測基準均採用最新收盤價 (.live)
                         tw2330: updates.tw2330 ? updates.tw2330.live : prev.tw2330,
                         twB: updates.twB ? updates.twB.live : prev.twB,
                         twC: updates.twC ? updates.twC.live : prev.twC
@@ -191,7 +215,7 @@
 
             useEffect(() => { runAutoSync(); }, [tickers]);
 
-            // --- 計算 (不變) ---
+            // --- 計算邏輯 ---
             const adrChangePct = useMemo(() => {
                 if (!baseData.adr || !liveData.adr) return 0;
                 return ((liveData.adr - baseData.adr) / baseData.adr) * 100;
@@ -210,12 +234,12 @@
                     agg: getPrice(baseData.tw2330, adrChangePct * 0.95)
                 };
                 const getB = (t2330) => {
+                    if (!baseData.tw2330) return 0;
                     const impact = ((t2330 - baseData.tw2330)/baseData.tw2330) * 100 * (tsmWeight/100);
                     return parseFloat((baseData.twB * (1 + impact/100)).toFixed(2));
                 };
                 const pB = { con: getB(p2330.con), neu: getB(p2330.neu), agg: getB(p2330.agg) };
                 const getC = (tB) => {
-                    // 防止 B 為 0 時除以 0
                     if (!baseData.twB) return 0;
                     const impact = ((tB - baseData.twB)/baseData.twB) * leverageC;
                     return parseFloat((baseData.twC * (1 + impact)).toFixed(2));
@@ -256,18 +280,18 @@
                                 <div className="grid grid-cols-2 gap-4 mb-4">
                                     <div>
                                         <label className="input-label">昨收基準 (分母)</label>
-                                        <input type="number" className={`input-field px-3 py-2 rounded text-right border-yellow-500 ${!baseData.adr && 'empty'}`} placeholder="等待..." value={baseData.adr || ''} onChange={e => setBaseData({...baseData, adr: parseFloat(e.target.value)})}/>
+                                        <input type="number" step="0.01" className={`input-field px-3 py-2 rounded text-right border-yellow-500 ${!baseData.adr && 'empty'}`} placeholder="等待..." value={baseData.adr || ''} onChange={e => setBaseData({...baseData, adr: parseFloat(e.target.value) || 0})}/>
                                     </div>
                                     <div>
                                         <label className="input-label">最新現價 (分子)</label>
-                                        <input type="number" className={`input-field px-3 py-2 rounded text-right font-bold text-lg border-blue-500 ${!liveData.adr && 'empty'}`} placeholder="等待..." value={liveData.adr || ''} onChange={e => setLiveData({...liveData, adr: parseFloat(e.target.value)})}/>
+                                        <input type="number" step="0.01" className={`input-field px-3 py-2 rounded text-right font-bold text-lg border-blue-500 ${!liveData.adr && 'empty'}`} placeholder="等待..." value={liveData.adr || ''} onChange={e => setLiveData({...liveData, adr: parseFloat(e.target.value) || 0})}/>
                                     </div>
                                 </div>
                                 <div className="flex justify-between items-center bg-slate-100 p-3 rounded-lg border border-slate-300">
                                     <div className="text-xs text-slate-500">即時漲跌幅</div>
                                     <div className={`text-2xl font-bold ${adrChangePct >= 0 ? 'text-up' : 'text-down'}`}>{adrChangePct > 0 ? '+' : ''}{fmt(adrChangePct)}%</div>
                                 </div>
-                                <div className="mt-4"><label className="input-label">匯率 (USD/TWD)</label><input type="number" className="input-field px-3 py-2 rounded text-yellow-400" value={liveData.fx || ''} onChange={e => setLiveData({...liveData, fx: parseFloat(e.target.value)})}/></div>
+                                <div className="mt-4"><label className="input-label">匯率 (USD/TWD)</label><input type="number" step="0.01" className="input-field px-3 py-2 rounded text-yellow-400" value={liveData.fx || ''} onChange={e => setLiveData({...liveData, fx: parseFloat(e.target.value) || 0})}/></div>
                             </div>
 
                             <div className="glass-panel p-5 rounded-xl border-l-4 border-green-500">
@@ -275,18 +299,18 @@
                                 <div className="space-y-3">
                                     <div className="flex justify-between items-center">
                                         <label className="text-slate-600 text-sm">2330 台積電</label>
-                                        <input type="number" className={`input-field w-28 px-2 py-1 rounded text-right text-slate-600 ${!baseData.tw2330 && 'empty'}`} placeholder="等待..." value={baseData.tw2330 || ''} onChange={e => setBaseData({...baseData, tw2330: parseFloat(e.target.value)})}/>
+                                        <input type="number" step="0.1" className={`input-field w-28 px-2 py-1 rounded text-right text-slate-600 ${!baseData.tw2330 && 'empty'}`} placeholder="等待..." value={baseData.tw2330 || ''} onChange={e => setBaseData({...baseData, tw2330: parseFloat(e.target.value) || 0})}/>
                                     </div>
                                     <div className="flex justify-between items-center">
                                         <input type="text" className="input-field w-20 px-2 py-1 rounded text-xs text-slate-600" value={tickers.b} onChange={e => setTickers({...tickers, b: e.target.value.trim()})}/>
-                                        <input type="number" className={`input-field w-28 px-2 py-1 rounded text-right text-slate-600 ${!baseData.twB && 'empty'}`} placeholder="等待..." value={baseData.twB || ''} onChange={e => setBaseData({...baseData, twB: parseFloat(e.target.value)})}/>
+                                        <input type="number" step="0.01" className={`input-field w-28 px-2 py-1 rounded text-right text-slate-600 ${!baseData.twB && 'empty'}`} placeholder="等待..." value={baseData.twB || ''} onChange={e => setBaseData({...baseData, twB: parseFloat(e.target.value) || 0})}/>
                                     </div>
                                     <div className="flex justify-between items-center">
                                         <input type="text" className="input-field w-20 px-2 py-1 rounded text-xs text-slate-600" value={tickers.c} onChange={e => setTickers({...tickers, c: e.target.value.trim()})}/>
-                                        <input type="number" className={`input-field w-28 px-2 py-1 rounded text-right text-slate-600 ${!baseData.twC && 'empty'}`} placeholder="等待..." value={baseData.twC || ''} onChange={e => setBaseData({...baseData, twC: parseFloat(e.target.value)})}/>
+                                        <input type="number" step="0.01" className={`input-field w-28 px-2 py-1 rounded text-right text-slate-600 ${!baseData.twC && 'empty'}`} placeholder="等待..." value={baseData.twC || ''} onChange={e => setBaseData({...baseData, twC: parseFloat(e.target.value) || 0})}/>
                                     </div>
                                 </div>
-                                <div className="mt-4 pt-4 border-t border-slate-300 flex items-center justify-between"><span className="text-xs text-slate-400">權重參數 {tsmWeight}%</span><input type="range" min="40" max="80" className="w-24 h-1 bg-slate-300 rounded-lg cursor-pointer" value={tsmWeight} onChange={e => setTsmWeight(e.target.value)}/></div>
+                                <div className="mt-4 pt-4 border-t border-slate-300 flex items-center justify-between"><span className="text-xs text-slate-400">權重參數 {tsmWeight}%</span><input type="range" min="40" max="80" className="w-24 h-1 bg-slate-300 rounded-lg cursor-pointer" value={tsmWeight} onChange={e => setTsmWeight(parseInt(e.target.value))}/></div>
                                 <div className="mt-3 flex items-center justify-between"><span className="text-xs text-slate-400">{tickers.c} 槓桿倍數 (1=現股, 2=正2)</span><input type="number" step="0.5" className="input-field w-16 px-2 py-1 rounded text-right text-slate-600" value={leverageC} onChange={e => setLeverageC(parseFloat(e.target.value) || 0)}/></div>
                             </div>
                         </div>
