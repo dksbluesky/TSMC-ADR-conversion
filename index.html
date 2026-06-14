@@ -63,18 +63,20 @@
                     if (validCloses.length === 0) return null;
 
                     // 1. 抓現價/最新收盤 (Live) -> 這是台股要用的基準 (例如 1585)
-                    let livePrice = meta.regularMarketPrice;
-                    // 如果 API 沒給現價 (盤後常發生)，用最後一根 K 棒
-                    if (!livePrice) livePrice = validCloses[validCloses.length - 1];
-
                     // 2. 抓昨收 (Prev) -> 這是 ADR 計算漲跌幅用的分母
-                    let prevPrice = meta.chartPreviousClose;
-                    // 如果 API 沒給昨收，用倒數第二根 K 棒
-                    if (!prevPrice && validCloses.length > 1) {
-                        prevPrice = validCloses[validCloses.length - 2];
-                    } else if (!prevPrice) {
-                        // 真的沒有昨收，只好用現價當參考
-                        prevPrice = livePrice;
+                    // 收盤/盤後時，chartPreviousClose 可能已經被 Yahoo 更新成「下一個交易日的昨收」，
+                    // 導致分子分母指向同一天。此時改用 K 線陣列，確保兩者是相鄰交易日。
+                    const isClosed = meta.marketState === "POSTPOST" || meta.marketState === "CLOSED" || !meta.regularMarketPrice;
+
+                    let livePrice, prevPrice;
+                    if (isClosed) {
+                        livePrice = validCloses[validCloses.length - 1];
+                        prevPrice = validCloses.length > 1
+                            ? validCloses[validCloses.length - 2]
+                            : (meta.chartPreviousClose || livePrice);
+                    } else {
+                        livePrice = meta.regularMarketPrice;
+                        prevPrice = meta.chartPreviousClose || meta.previousClose || validCloses[validCloses.length - 1];
                     }
                     
                     return {
