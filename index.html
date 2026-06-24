@@ -41,6 +41,7 @@
             const [tsmWeight, setTsmWeight] = useState(60);
             const [tickers, setTickers] = useState({ b: "006208", c: "00878" });
             const [leverageC, setLeverageC] = useState(1);
+            const [leverageTicker, setLeverageTicker] = useState("00878");
             
             const [loading, setLoading] = useState(true);
             const [statusMsg, setStatusMsg] = useState("系統啟動...");
@@ -304,7 +305,13 @@
                                     </div>
                                 </div>
                                 <div className="mt-4 pt-4 border-t border-slate-300 flex items-center justify-between"><span className="text-xs text-slate-400">權重參數 {tsmWeight}%</span><input type="range" min="40" max="80" className="w-24 h-1 bg-slate-300 rounded-lg cursor-pointer" value={tsmWeight} onChange={e => setTsmWeight(parseInt(e.target.value))}/></div>
-                                <div className="mt-3 flex items-center justify-between"><span className="text-xs text-slate-400">{tickers.c} 槓桿倍數 (1=現股, 2=正2)</span><input type="number" step="0.5" className="input-field w-16 px-2 py-1 rounded text-right text-slate-600" value={leverageC} onChange={e => setLeverageC(parseFloat(e.target.value) || 0)}/></div>
+                                <div className="mt-3 flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-1 text-xs text-slate-400 whitespace-nowrap">
+                                        <input type="text" className="input-field w-16 px-1 py-1 rounded text-xs text-slate-600" value={leverageTicker} onChange={e => setLeverageTicker(e.target.value.trim())}/>
+                                        槓桿倍數 (1=現股, 2=正2)
+                                    </div>
+                                    <input type="number" step="0.5" className="input-field w-16 px-2 py-1 rounded text-right text-slate-600" value={leverageC} onChange={e => setLeverageC(parseFloat(e.target.value) || 0)}/>
+                                </div>
                             </div>
                         </div>
 
@@ -329,7 +336,7 @@
                                 <div className="bg-slate-100 px-6 py-3 border-b border-slate-300"><h3 className="font-bold text-slate-900 text-sm uppercase tracking-wide">今日開盤預估</h3></div>
                                 {predictions && baseData.tw2330 > 0 ? (
                                     <table className="w-full text-left text-sm">
-                                        <thead><tr className="border-b border-slate-300 bg-slate-100 text-slate-500"><th className="p-4 font-medium">情境</th><th className="p-4 font-medium">2330</th><th className="p-4 font-medium">{tickers.b}</th><th className="p-4 font-medium">{tickers.c}</th></tr></thead>
+                                        <thead><tr className="border-b border-slate-300 bg-slate-100 text-slate-500"><th className="p-4 font-medium">情境</th><th className="p-4 font-medium">2330</th><th className="p-4 font-medium">{tickers.b}</th><th className="p-4 font-medium">{leverageTicker}</th></tr></thead>
                                         <tbody className="divide-y divide-gray-700/50">
                                             <tr className="hover:bg-slate-100 transition"><td className="p-4 text-slate-500 font-bold">保守 (60%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.con, baseData.tw2330)}`}>{fmt(predictions.p2330.con)}</td><td className={`p-4 font-mono ${color(predictions.pB.con, baseData.twB)}`}>{fmt(predictions.pB.con)}</td><td className={`p-4 font-mono ${color(predictions.pC.con, baseData.twC)}`}>{fmt(predictions.pC.con)}</td></tr>
                                             <tr className="hover:bg-slate-100 transition bg-slate-50 border-l-4 border-l-blue-500"><td className="p-4 text-blue-400 font-bold">中性 (80%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.neu, baseData.tw2330)}`}>{fmt(predictions.p2330.neu)}</td><td className={`p-4 font-mono ${color(predictions.pB.neu, baseData.twB)}`}>{fmt(predictions.pB.neu)}</td><td className={`p-4 font-mono ${color(predictions.pC.neu, baseData.twC)}`}>{fmt(predictions.pC.neu)}</td></tr>
