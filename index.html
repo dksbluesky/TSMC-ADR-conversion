@@ -42,6 +42,10 @@
             const [tickers, setTickers] = useState({ b: "006208", c: "00878" });
             const [leverageC, setLeverageC] = useState(1);
             const [leverageTicker, setLeverageTicker] = useState(() => localStorage.getItem("leverageTicker") || "00878");
+            const [corrLevels, setCorrLevels] = useState(() => {
+                const saved = localStorage.getItem("corrLevels");
+                return saved ? JSON.parse(saved) : { con: 60, neu: 80, agg: 95 };
+            });
             
             const [loading, setLoading] = useState(true);
             const [statusMsg, setStatusMsg] = useState("系統啟動...");
@@ -209,6 +213,7 @@
 
             useEffect(() => { runAutoSync(); }, [tickers]);
             useEffect(() => { localStorage.setItem("leverageTicker", leverageTicker); }, [leverageTicker]);
+            useEffect(() => { localStorage.setItem("corrLevels", JSON.stringify(corrLevels)); }, [corrLevels]);
 
             // --- 計算邏輯 ---
             const adrChangePct = useMemo(() => {
@@ -224,9 +229,9 @@
                 const getPrice = (base, pct) => Math.round(base * (1 + pct/100));
                 
                 const p2330 = {
-                    con: getPrice(baseData.tw2330, adrChangePct * 0.6),
-                    neu: getPrice(baseData.tw2330, adrChangePct * 0.8),
-                    agg: getPrice(baseData.tw2330, adrChangePct * 0.95)
+                    con: getPrice(baseData.tw2330, adrChangePct * (corrLevels.con/100)),
+                    neu: getPrice(baseData.tw2330, adrChangePct * (corrLevels.neu/100)),
+                    agg: getPrice(baseData.tw2330, adrChangePct * (corrLevels.agg/100))
                 };
                 const getB = (t2330) => {
                     if (!baseData.tw2330) return 0;
@@ -241,7 +246,7 @@
                 };
                 const pC = { con: getC(pB.con), neu: getC(pB.neu), agg: getC(pB.agg) };
                 return { p2330, pB, pC };
-            }, [baseData, adrChangePct, tsmWeight, leverageC]);
+            }, [baseData, adrChangePct, tsmWeight, leverageC, corrLevels]);
 
             const fmt = (n) => n ? new Intl.NumberFormat('zh-TW', { maximumFractionDigits: 2, minimumFractionDigits: 2 }).format(n) : "---";
             const color = (v, base) => v > base ? 'text-up' : v < base ? 'text-down' : 'text-slate-500';
@@ -339,9 +344,9 @@
                                     <table className="w-full text-left text-sm">
                                         <thead><tr className="border-b border-slate-300 bg-slate-100 text-slate-500"><th className="p-4 font-medium">情境</th><th className="p-4 font-medium">2330</th><th className="p-4 font-medium">{tickers.b}</th><th className="p-4 font-medium">{leverageTicker}</th></tr></thead>
                                         <tbody className="divide-y divide-gray-700/50">
-                                            <tr className="hover:bg-slate-100 transition"><td className="p-4 text-slate-500 font-bold">保守 (60%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.con, baseData.tw2330)}`}>{fmt(predictions.p2330.con)}</td><td className={`p-4 font-mono ${color(predictions.pB.con, baseData.twB)}`}>{fmt(predictions.pB.con)}</td><td className={`p-4 font-mono ${color(predictions.pC.con, baseData.twC)}`}>{fmt(predictions.pC.con)}</td></tr>
-                                            <tr className="hover:bg-slate-100 transition bg-slate-50 border-l-4 border-l-blue-500"><td className="p-4 text-blue-400 font-bold">中性 (80%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.neu, baseData.tw2330)}`}>{fmt(predictions.p2330.neu)}</td><td className={`p-4 font-mono ${color(predictions.pB.neu, baseData.twB)}`}>{fmt(predictions.pB.neu)}</td><td className={`p-4 font-mono ${color(predictions.pC.neu, baseData.twC)}`}>{fmt(predictions.pC.neu)}</td></tr>
-                                            <tr className="hover:bg-slate-100 transition"><td className="p-4 text-red-400 font-bold">樂觀 (95%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.agg, baseData.tw2330)}`}>{fmt(predictions.p2330.agg)}</td><td className={`p-4 font-mono ${color(predictions.pB.agg, baseData.twB)}`}>{fmt(predictions.pB.agg)}</td><td className={`p-4 font-mono ${color(predictions.pC.agg, baseData.twC)}`}>{fmt(predictions.pC.agg)}</td></tr>
+                                            <tr className="hover:bg-slate-100 transition"><td className="p-4 text-slate-500 font-bold whitespace-nowrap">保守 (<input type="number" step="5" className="input-field w-12 px-1 py-0 rounded text-center text-slate-600 font-normal" value={corrLevels.con} onChange={e => setCorrLevels({...corrLevels, con: parseFloat(e.target.value) || 0})}/>%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.con, baseData.tw2330)}`}>{fmt(predictions.p2330.con)}</td><td className={`p-4 font-mono ${color(predictions.pB.con, baseData.twB)}`}>{fmt(predictions.pB.con)}</td><td className={`p-4 font-mono ${color(predictions.pC.con, baseData.twC)}`}>{fmt(predictions.pC.con)}</td></tr>
+                                            <tr className="hover:bg-slate-100 transition bg-slate-50 border-l-4 border-l-blue-500"><td className="p-4 text-blue-400 font-bold whitespace-nowrap">中性 (<input type="number" step="5" className="input-field w-12 px-1 py-0 rounded text-center text-slate-600 font-normal" value={corrLevels.neu} onChange={e => setCorrLevels({...corrLevels, neu: parseFloat(e.target.value) || 0})}/>%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.neu, baseData.tw2330)}`}>{fmt(predictions.p2330.neu)}</td><td className={`p-4 font-mono ${color(predictions.pB.neu, baseData.twB)}`}>{fmt(predictions.pB.neu)}</td><td className={`p-4 font-mono ${color(predictions.pC.neu, baseData.twC)}`}>{fmt(predictions.pC.neu)}</td></tr>
+                                            <tr className="hover:bg-slate-100 transition"><td className="p-4 text-red-400 font-bold whitespace-nowrap">樂觀 (<input type="number" step="5" className="input-field w-12 px-1 py-0 rounded text-center text-slate-600 font-normal" value={corrLevels.agg} onChange={e => setCorrLevels({...corrLevels, agg: parseFloat(e.target.value) || 0})}/>%)</td><td className={`p-4 font-mono font-bold text-lg ${color(predictions.p2330.agg, baseData.tw2330)}`}>{fmt(predictions.p2330.agg)}</td><td className={`p-4 font-mono ${color(predictions.pB.agg, baseData.twB)}`}>{fmt(predictions.pB.agg)}</td><td className={`p-4 font-mono ${color(predictions.pC.agg, baseData.twC)}`}>{fmt(predictions.pC.agg)}</td></tr>
                                         </tbody>
                                     </table>
                                 ) : (
