@@ -57,13 +57,18 @@
                     const quotes = result.indicators.quote[0].close;
                     const timestamps = result.timestamp;
                     
+                    // 用該商品自己交易所的 UTC 偏移量算出「交易所當地日期」的天數編號，
+                    // 避免用瀏覽器當地時區判斷日期，導致跨時區（例：台北 vs 美東）誤判成不同天。
+                    const offset = meta.gmtoffset || 0;
+                    const dayKey = (ts) => Math.floor((ts + offset) / 86400);
+
                     const validData = [];
                     if (quotes && timestamps) {
                         for (let i = 0; i < quotes.length; i++) {
                             if (quotes[i] !== null && quotes[i] !== undefined) {
                                 validData.push({
                                     timestamp: timestamps[i],
-                                    dateStr: new Date(timestamps[i] * 1000).toLocaleDateString('zh-TW'),
+                                    day: dayKey(timestamps[i]),
                                     price: quotes[i]
                                 });
                             }
@@ -86,9 +91,9 @@
                     // 的日期比對陣列最後一筆日期，若 meta 較新，代表陣列缺了最新一天，
                     // 此時用 meta.regularMarketPrice 補上真正的最新收盤，原陣列最後一筆退位成昨收。
                     if (meta.regularMarketPrice && meta.regularMarketTime) {
-                        const metaDateStr = new Date(meta.regularMarketTime * 1000).toLocaleDateString('zh-TW');
-                        const lastArrDateStr = validData[validData.length - 1].dateStr;
-                        if (metaDateStr !== lastArrDateStr) {
+                        const metaDay = dayKey(meta.regularMarketTime);
+                        const lastArrDay = validData[validData.length - 1].day;
+                        if (metaDay !== lastArrDay) {
                             prevPrice = livePrice;
                             livePrice = meta.regularMarketPrice;
                         }
