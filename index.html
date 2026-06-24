@@ -72,7 +72,7 @@
 
                     if (validData.length === 0) return null;
 
-                    const livePrice = validData[validData.length - 1].price;
+                    let livePrice = validData[validData.length - 1].price;
 
                     let prevPrice = null;
                     if (validData.length > 1) {
@@ -80,8 +80,21 @@
                     } else {
                         prevPrice = meta.chartPreviousClose || livePrice;
                     }
-                    
-                    console.log(`🎯 [${meta.symbol}] 精準校正判定 -> 分子(6/13最新): ${livePrice}, 分母(6/12昨收): ${prevPrice}`);
+
+                    // K 線陣列的最新收盤回補有時會落後（常見於成交量較小的 ETF），
+                    // 導致陣列最後一筆其實是「前天」而非「昨天」。用 meta.regularMarketTime
+                    // 的日期比對陣列最後一筆日期，若 meta 較新，代表陣列缺了最新一天，
+                    // 此時用 meta.regularMarketPrice 補上真正的最新收盤，原陣列最後一筆退位成昨收。
+                    if (meta.regularMarketPrice && meta.regularMarketTime) {
+                        const metaDateStr = new Date(meta.regularMarketTime * 1000).toLocaleDateString('zh-TW');
+                        const lastArrDateStr = validData[validData.length - 1].dateStr;
+                        if (metaDateStr !== lastArrDateStr) {
+                            prevPrice = livePrice;
+                            livePrice = meta.regularMarketPrice;
+                        }
+                    }
+
+                    console.log(`🎯 [${meta.symbol}] 精準校正判定 -> 分子(最新): ${livePrice}, 分母(昨收): ${prevPrice}`);
                     
                     return {
                         live: parseFloat(livePrice.toFixed(2)),
