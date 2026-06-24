@@ -41,7 +41,7 @@
             const [tsmWeight, setTsmWeight] = useState(60);
             const [tickers, setTickers] = useState({ b: "006208", c: "00878" });
             const [leverageC, setLeverageC] = useState(1);
-            const [leverageTicker, setLeverageTicker] = useState("00878");
+            const [leverageTicker, setLeverageTicker] = useState(() => localStorage.getItem("leverageTicker") || "00878");
             
             const [loading, setLoading] = useState(true);
             const [statusMsg, setStatusMsg] = useState("系統啟動...");
@@ -208,6 +208,7 @@
             };
 
             useEffect(() => { runAutoSync(); }, [tickers]);
+            useEffect(() => { localStorage.setItem("leverageTicker", leverageTicker); }, [leverageTicker]);
 
             // --- 計算邏輯 ---
             const adrChangePct = useMemo(() => {
