@@ -227,11 +227,14 @@
             const predictions = useMemo(() => {
                 if (!baseData.tw2330) return null;
                 const getPrice = (base, pct) => Math.round(base * (1 + pct/100));
-                
+
+                // 用「溢價率」(現在 ADR 折算價 vs 2330 昨收的落差) 當作明天開盤要收斂的缺口，
+                // corrLevels 代表預期這個缺口會收斂掉的比例，而不是套用 TSM 自己的漲跌幅。
+                // 這樣 2330 預估會跟上面 理論折算價/溢價率 算的是同一個缺口，而不是兩套互不相關的數字。
                 const p2330 = {
-                    con: getPrice(baseData.tw2330, adrChangePct * (corrLevels.con/100)),
-                    neu: getPrice(baseData.tw2330, adrChangePct * (corrLevels.neu/100)),
-                    agg: getPrice(baseData.tw2330, adrChangePct * (corrLevels.agg/100))
+                    con: getPrice(baseData.tw2330, premium * (corrLevels.con/100)),
+                    neu: getPrice(baseData.tw2330, premium * (corrLevels.neu/100)),
+                    agg: getPrice(baseData.tw2330, premium * (corrLevels.agg/100))
                 };
                 const getB = (t2330) => {
                     if (!baseData.tw2330) return 0;
@@ -246,7 +249,7 @@
                 };
                 const pC = { con: getC(pB.con), neu: getC(pB.neu), agg: getC(pB.agg) };
                 return { p2330, pB, pC };
-            }, [baseData, adrChangePct, tsmWeight, leverageC, corrLevels]);
+            }, [baseData, premium, tsmWeight, leverageC, corrLevels]);
 
             const fmt = (n) => n ? new Intl.NumberFormat('zh-TW', { maximumFractionDigits: 2, minimumFractionDigits: 2 }).format(n) : "---";
             const color = (v, base) => v > base ? 'text-up' : v < base ? 'text-down' : 'text-slate-500';
