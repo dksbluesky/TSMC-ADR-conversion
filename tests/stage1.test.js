@@ -315,7 +315,7 @@ test('service worker installs the changed app shell and activates the new cache 
   };
   const caches = {
     open: async name => ({ addAll: async files => { added.push({ name, files }); }, put: async () => {} }),
-    keys: async () => ['tsmc-adr-shell-v2', 'another-cache', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4'],
+    keys: async () => ['tsmc-adr-shell-v2', 'another-cache', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5'],
     delete: async key => { deleted.push(key); return true; },
     match: async () => null
   };
@@ -323,11 +323,11 @@ test('service worker installs the changed app shell and activates the new cache 
   let installPromise;
   handlers.install({ waitUntil: promise => { installPromise = promise; } });
   await installPromise;
-  assert.equal(added[0].name, 'tsmc-adr-shell-v5');
+  assert.equal(added[0].name, 'tsmc-adr-shell-v6');
   assert.ok(added[0].files.includes('./app.jsx'));
   assert.ok(added[0].files.includes('./market-data.js'));
   let activatePromise;
   handlers.activate({ waitUntil: promise => { activatePromise = promise; } });
   await activatePromise;
-  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4'].sort());
+  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5'].sort());
 });
