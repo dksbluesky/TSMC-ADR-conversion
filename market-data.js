@@ -1,0 +1,449 @@
+(function (root) {
+  const TIME_ZONES = { US: 'America/New_York', TW: 'Asia/Taipei' };
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  function partsInZone(timestamp, zone) {
+    const values = new Intl.DateTimeFormat('en-CA', {
+      timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+    }).formatToParts(new Date(timestamp));
+    return Object.fromEntries(values.filter(x => x.type !== 'literal').map(x => [x.type, Number(x.value)]));
+  }
+
+  function dateKey(timestamp, zone) {
+    const p = partsInZone(timestamp, zone);
+    return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+  }
+
+  // Convert a local exchange close to UTC without assuming a fixed offset (DST safe).
+  function zonedTimeToUtc(date, hour, minute, zone) {
+    const [year, month, day] = date.split('-').map(Number);
+    const desiredUtc = Date.UTC(year, month - 1, day, hour, minute);
+    let candidate = desiredUtc;
+    for (let i = 0; i < 3; i++) {
+      const p = partsInZone(candidate, zone);
+      const represented = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+      candidate += desiredUtc - represented;
+    }
+    return candidate;
+  }
+
+  function exchangeCloseMs(date, market) {
+    return market === 'US'
+      ? zonedTimeToUtc(date, 16, 0, TIME_ZONES.US)
+      : zonedTimeToUtc(date, 13, 30, TIME_ZONES.TW);
+  }
+
+  function weekday(year, month, day) {
+    return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  }
+
+  function nthWeekday(year, month, targetWeekday, n) {
+    const first = weekday(year, month, 1);
+    return 1 + ((targetWeekday - first + 7) % 7) + (n - 1) * 7;
+  }
+
+  function lastWeekday(year, month, targetWeekday) {
+    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return lastDay - ((weekday(year, month, lastDay) - targetWeekday + 7) % 7);
+  }
+
+  function observedFixedDate(year, month, day) {
+    const dow = weekday(year, month, day);
+    const date = new Date(Date.UTC(year, month - 1, day + (dow === 6 ? -1 : dow === 0 ? 1 : 0)));
+    return date.toISOString().slice(0, 10);
+  }
+
+  function easterSunday(year) {
+    const a = year % 19, b = Math.floor(year / 100), c = year % 100;
+    const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7;
+    const m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31);
+    const day = ((h + l - 7 * m + 114) % 31) + 1;
+    return new Date(Date.UTC(year, month - 1, day));
+  }
+
+  function usMarketHolidays(year) {
+    const holidays = new Set([
+      observedFixedDate(year, 1, 1),
+      `${year}-01-${String(nthWeekday(year, 1, 1, 3)).padStart(2, '0')}`,
+      `${year}-02-${String(nthWeekday(year, 2, 1, 3)).padStart(2, '0')}`,
+      `${year}-05-${String(lastWeekday(year, 5, 1)).padStart(2, '0')}`,
+      observedFixedDate(year, 7, 4),
+      `${year}-09-${String(nthWeekday(year, 9, 1, 1)).padStart(2, '0')}`,
+      `${year}-11-${String(nthWeekday(year, 11, 4, 4)).padStart(2, '0')}`,
+      observedFixedDate(year, 12, 25)
+    ]);
+    if (year >= 2022) holidays.add(observedFixedDate(year, 6, 19));
+    const goodFriday = easterSunday(year);
+    goodFriday.setUTCDate(goodFriday.getUTCDate() - 2);
+    holidays.add(goodFriday.toISOString().slice(0, 10));
+    // Saturday New Year's Day is observed by US equity markets on the preceding Friday.
+    if (weekday(year, 1, 1) === 6) holidays.add(`${year - 1}-12-31`);
+    return holidays;
+  }
+
+  function isUsTradingDay(date) {
+    const day = new Date(`${date}T12:00:00Z`).getUTCDay();
+    if (day === 0 || day === 6) return false;
+    return !usMarketHolidays(Number(date.slice(0, 4))).has(date);
+  }
+
+  function parseYahooChart(json, market, nowMs = Date.now(), maxAgeDays = 7) {
+    const result = json?.chart?.result?.[0];
+    const timestamps = result?.timestamp;
+    const closes = result?.indicators?.quote?.[0]?.close;
+    if (!Array.isArray(timestamps) || !Array.isArray(closes) || !TIME_ZONES[market]) {
+      throw new Error('Yahoo response is missing daily timestamps or closing prices.');
+    }
+
+    const zone = TIME_ZONES[market];
+    const completed = [];
+    for (let i = 0; i < Math.min(timestamps.length, closes.length); i++) {
+      const timestamp = Number(timestamps[i]) * 1000;
+      const price = Number(closes[i]);
+      if (!Number.isFinite(timestamp) || !Number.isFinite(price) || price <= 0) continue;
+      const sessionDate = dateKey(timestamp, zone);
+      if (market === 'US' && !isUsTradingDay(sessionDate)) continue;
+      const closeTimestamp = exchangeCloseMs(sessionDate, market);
+      // Yahoo daily-bar timestamps are often at session open. The bar is usable only
+      // after the exchange's regular close, never merely because its timestamp passed.
+      if (closeTimestamp > nowMs) continue;
+      completed.push({ price, sessionDate, barTimestampMs: timestamp, closeTimestampMs: closeTimestamp });
+    }
+    completed.sort((a, b) => a.closeTimestampMs - b.closeTimestampMs);
+    if (completed.length < 2) throw new Error('Fewer than two completed regular-session closes were returned.');
+
+    const latest = completed[completed.length - 1];
+    const previous = completed[completed.length - 2];
+    if (nowMs - latest.closeTimestampMs > maxAgeDays * DAY_MS) {
+      throw new Error(`Latest ${market} close is stale (${latest.sessionDate}).`);
+    }
+    return { latest, previous, market, symbol: result.meta?.symbol || '', source: 'Yahoo Finance chart API' };
+  }
+
+  function normalizeTaiwanSessionDate(value) {
+    const raw = String(value || '').trim();
+    const match = raw.match(/^(\d{2,4})[/-](\d{1,2})[/-](\d{1,2})$/);
+    if (!match) return null;
+    let year = Number(match[1]);
+    if (year < 1911) year += 1911;
+    const key = `${year}-${String(match[2]).padStart(2, '0')}-${String(match[3]).padStart(2, '0')}`;
+    const parsed = new Date(`${key}T00:00:00Z`);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === key ? key : null;
+  }
+
+  function parseTwseDailyQuote(json, symbol, expectedDate, retrievedAtMs = Date.now()) {
+    if (!/^\d{4,6}$/.test(String(symbol || '')) || !/^\d{4}-\d{2}-\d{2}$/.test(expectedDate || '')) {
+      throw new Error('TWSE fallback request has an invalid symbol or target date.');
+    }
+    const expectedMonth = expectedDate.slice(0, 7).replace('-', '');
+    if (json?.stat !== 'OK' || String(json?.date || '').slice(0, 6) !== expectedMonth ||
+        !String(json?.title || '').includes(String(symbol))) {
+      throw new Error(`TWSE response does not match ${symbol} for ${expectedDate.slice(0, 7)}.`);
+    }
+    if (!Number.isFinite(retrievedAtMs) || retrievedAtMs > Date.now() + 1000) {
+      throw new Error('TWSE response retrieval timestamp is invalid or future-dated.');
+    }
+    const fields = json.fields || [];
+    const dateIndex = fields.indexOf('日期');
+    const closeIndex = fields.indexOf('收盤價');
+    if (dateIndex < 0 || closeIndex < 0 || !Array.isArray(json.data)) {
+      throw new Error('TWSE daily response is missing date or close fields.');
+    }
+    const matches = json.data.filter(row => normalizeTaiwanSessionDate(row?.[dateIndex]) === expectedDate);
+    if (matches.length !== 1) throw new Error(`TWSE has no unique completed row for ${symbol} on ${expectedDate}.`);
+    const rawPrice = String(matches[0][closeIndex] || '').replace(/,/g, '').trim();
+    const price = Number(rawPrice);
+    const closeTimestampMs = exchangeCloseMs(expectedDate, 'TW');
+    if (!Number.isFinite(price) || price <= 0 || closeTimestampMs > retrievedAtMs) {
+      throw new Error(`TWSE close for ${symbol} on ${expectedDate} is invalid or not yet complete.`);
+    }
+    // STOCK_DAY supplies a trading date, not a per-row publication timestamp.
+    // Use the official session close as the market timestamp and retain receipt time separately.
+    return {
+      latest: {
+        price, sessionDate: expectedDate, barTimestampMs: closeTimestampMs, closeTimestampMs
+      },
+      market: 'TW', symbol: `${symbol}.TW`, source: 'TWSE official STOCK_DAY',
+      retrievedAtMs
+    };
+  }
+
+  function validateFxResponse(json, nowMs = Date.now(), maxAgeMs = 96 * 60 * 60 * 1000) {
+    const price = Number(json?.rates?.TWD);
+    const timestamp = Number(json?.time_last_update_unix) * 1000;
+    if (!Number.isFinite(price) || price <= 0) throw new Error('USD/TWD source did not return a valid TWD rate.');
+    if (!Number.isFinite(timestamp) || timestamp <= 0 || timestamp > nowMs || nowMs - timestamp > maxAgeMs) {
+      throw new Error('USD/TWD source timestamp is missing, future-dated, or stale.');
+    }
+    return { price, timestampMs: timestamp, source: 'exchangerate-api.com' };
+  }
+
+  function validateBundle(bundle, nowMs = Date.now()) {
+    const required = ['adr', 'tw2330', 'twB', 'twC', 'fx'];
+    const missing = required.filter(key => !bundle?.[key]);
+    if (missing.length) throw new Error(`Incomplete synchronization: ${missing.join(', ')} unavailable.`);
+    for (const key of required.slice(0, 4)) {
+      const item = bundle[key];
+      if (!Number.isFinite(item.latest?.price) || item.latest.price <= 0 ||
+          !Number.isFinite(item.latest?.barTimestampMs) || item.latest.closeTimestampMs > nowMs) {
+        throw new Error(`Invalid or not-yet-completed price observation: ${key}.`);
+      }
+    }
+    for (const key of ['tw2330', 'twB', 'twC']) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(bundle[key].latest?.sessionDate || '')) {
+        throw new Error(`Invalid Taiwan session date: ${key}.`);
+      }
+    }
+    if (!Number.isFinite(bundle.fx.price) || bundle.fx.price <= 0 ||
+        !Number.isFinite(bundle.fx.timestampMs) || bundle.fx.timestampMs > nowMs ||
+        nowMs - bundle.fx.timestampMs > 96 * 60 * 60 * 1000) {
+      throw new Error('Invalid or stale USD/TWD observation.');
+    }
+    return true;
+  }
+
+  function taiwanSessionsAligned(quotes) {
+    const dates = (quotes || []).filter(Boolean).map(item => item.latest?.sessionDate).filter(Boolean);
+    return new Set(dates).size <= 1;
+  }
+
+  function latestCompletedTaiwanSessionDate(nowMs, calendar) {
+    if (!calendar) return null;
+    let date = taipeiDateKey(nowMs);
+    for (let day = 0; day < 31; day++) {
+      if (isTaiwanTradingDay(date, calendar) && exchangeCloseMs(date, 'TW') <= nowMs) return date;
+      const previous = new Date(`${date}T12:00:00+08:00`);
+      previous.setUTCDate(previous.getUTCDate() - 1);
+      date = previous.toISOString().slice(0, 10);
+    }
+    return null;
+  }
+
+  function taiwanQuoteFreshness(quote, expectedDate, nowMs = Date.now()) {
+    const latest = quote?.latest;
+    if (!expectedDate || !Number.isFinite(latest?.price) || latest.price <= 0 ||
+        !Number.isFinite(latest?.barTimestampMs) || !Number.isFinite(latest?.closeTimestampMs) ||
+        latest.closeTimestampMs > nowMs || !/^\d{4}-\d{2}-\d{2}$/.test(latest.sessionDate || '')) {
+      return 'UNAVAILABLE';
+    }
+    if (latest.sessionDate === expectedDate) return 'FRESH';
+    return latest.sessionDate < expectedDate ? 'STALE' : 'UNAVAILABLE';
+  }
+
+  function resolvePrice(manualValue, manualTimestamp, automaticValue, automaticTimestamp) {
+    if (manualValue !== '' && manualValue !== null && manualValue !== undefined) {
+      const price = Number(manualValue);
+      if (!Number.isFinite(price) || price <= 0) return null;
+      return { price, timestampMs: manualTimestamp || null, source: '手動輸入' };
+    }
+    if (!Number.isFinite(automaticValue) || automaticValue <= 0) return null;
+    return { price: automaticValue, timestampMs: automaticTimestamp || null, source: '自動來源' };
+  }
+
+  function formatPriceInput(value, kind = 'price') {
+    if (value === '' || value === null || value === undefined) return '';
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return String(value);
+    if (kind === 'fx') return number.toFixed(5).replace(/\.?0+$/, '');
+    return number.toFixed(2);
+  }
+
+  function baseline(prices) {
+    const result = {
+      tw2330: roundToTick(prices?.tw2330, 'stock'),
+      twB: roundToTick(prices?.twB, 'etf'),
+      twC: roundToTick(prices?.twC, 'etf')
+    };
+    return Object.values(result).some(Number.isFinite) ? result : null;
+  }
+
+  function verifiedTaiwanBaseline(prices, freshness) {
+    const accepted = {};
+    for (const key of ['tw2330', 'twB', 'twC']) {
+      if (freshness?.[key] === 'FRESH' || freshness?.[key] === 'MANUAL') accepted[key] = prices?.[key];
+    }
+    return baseline(accepted);
+  }
+
+  function tickSize(price, type) {
+    if (type === 'etf') return price < 50 ? 0.01 : 0.05;
+    if (price < 10) return 0.01;
+    if (price < 50) return 0.05;
+    if (price < 100) return 0.1;
+    if (price < 500) return 0.5;
+    if (price < 1000) return 1;
+    return 5;
+  }
+
+  function roundToTick(value, type) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    let tick = tickSize(n, type);
+    let rounded = Math.round((n + Number.EPSILON) / tick) * tick;
+    // Re-evaluate around price-band boundaries so the returned value is legal in its band.
+    for (let i = 0; i < 3; i++) {
+      const nextTick = tickSize(rounded, type);
+      if (nextTick === tick) break;
+      tick = nextTick;
+      rounded = Math.round((n + Number.EPSILON) / tick) * tick;
+    }
+    const decimals = tick < 0.1 ? 2 : tick < 1 ? 1 : 0;
+    return Number(rounded.toFixed(decimals));
+  }
+
+  function taipeiDateKey(timestamp) { return dateKey(timestamp, TIME_ZONES.TW); }
+
+  function snapshotCutoffMs(date) {
+    return zonedTimeToUtc(date, 8, 45, TIME_ZONES.TW);
+  }
+
+  function taiwanMarketOpenMs(date) {
+    return zonedTimeToUtc(date, 9, 0, TIME_ZONES.TW);
+  }
+
+  function mayCaptureSnapshot(nowMs, tradingDay, dataValid, savedSnapshot, latestInputTimestamp = 0) {
+    if (!tradingDay || !dataValid) return false;
+    const date = taipeiDateKey(nowMs);
+    if (savedSnapshot?.targetDate === date) return false;
+    return nowMs >= snapshotCutoffMs(date) && nowMs < taiwanMarketOpenMs(date) &&
+      latestInputTimestamp <= nowMs;
+  }
+
+  function mayRetrieveActualOpen(nowMs, targetDate) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(targetDate || '') &&
+      nowMs >= taiwanMarketOpenMs(targetDate) + 60 * 1000;
+  }
+
+  function parseYahooOpenings(json, market, targetDates, nowMs = Date.now()) {
+    const result = json?.chart?.result?.[0];
+    const timestamps = result?.timestamp;
+    const opens = result?.indicators?.quote?.[0]?.open;
+    if (!Array.isArray(timestamps) || !Array.isArray(opens) || market !== 'TW') {
+      throw new Error('Yahoo response is missing Taiwan daily timestamps or opening prices.');
+    }
+    const wanted = new Set(targetDates || []);
+    const found = {};
+    for (let i = 0; i < Math.min(timestamps.length, opens.length); i++) {
+      const timestamp = Number(timestamps[i]) * 1000;
+      const price = Number(opens[i]);
+      if (!Number.isFinite(timestamp) || !Number.isFinite(price) || price <= 0) continue;
+      const sessionDate = dateKey(timestamp, TIME_ZONES.TW);
+      if (!wanted.has(sessionDate) || !mayRetrieveActualOpen(nowMs, sessionDate)) continue;
+      found[sessionDate] = {
+        price,
+        sessionDate,
+        barTimestampMs: timestamp,
+        retrievedAtMs: nowMs
+      };
+    }
+    return found;
+  }
+
+  function appendImmutableRecord(records, record, key = 'targetDate') {
+    const current = Array.isArray(records) ? records : [];
+    if (!record || !record[key] || current.some(item => item?.[key] === record[key])) return current;
+    return [...current, record];
+  }
+
+  function calculateForwardMetrics(snapshots, outcomes, expectedSymbols = {}) {
+    const outcomeByDate = new Map();
+    for (const item of Array.isArray(outcomes) ? outcomes : []) {
+      if (!item?.targetDate) continue;
+      const merged = outcomeByDate.get(item.targetDate) || { actualOpen: {}, symbols: {} };
+      Object.assign(merged.actualOpen, item.actualOpen || {});
+      Object.assign(merged.symbols, item.symbols || {});
+      outcomeByDate.set(item.targetDate, merged);
+    }
+    const fields = ['tw2330', 'twB', 'twC'];
+    return Object.fromEntries(fields.map(field => {
+      const errors = [];
+      const directionHits = [];
+      for (const snapshot of Array.isArray(snapshots) ? snapshots : []) {
+        const outcome = outcomeByDate.get(snapshot?.targetDate);
+        if (field !== 'tw2330') {
+          const defaultSymbol = field === 'twB' ? '006208' : '00878';
+          const snapshotSymbol = snapshot?.symbols?.[field] || defaultSymbol;
+          const outcomeSymbol = outcome?.symbols?.[field] || snapshotSymbol;
+          const expectedSymbol = expectedSymbols[field] || defaultSymbol;
+          if (snapshotSymbol !== expectedSymbol || outcomeSymbol !== expectedSymbol) continue;
+        }
+        const previousClose = Number(snapshot?.prices?.[field]);
+        const predicted = Number(snapshot?.predictions?.[field] ?? previousClose);
+        const actual = Number(outcome?.actualOpen?.[field]);
+        if (!Number.isFinite(predicted) || predicted <= 0 || !Number.isFinite(actual) || actual <= 0) continue;
+        errors.push(Math.abs(predicted - actual));
+        const predictedDirection = Math.sign(predicted - previousClose);
+        if (predictedDirection) {
+          directionHits.push(Math.sign(actual - previousClose) === predictedDirection);
+        }
+      }
+      return [field, {
+        validObservations: errors.length,
+        mae: errors.length ? errors.reduce((sum, value) => sum + value, 0) / errors.length : null,
+        directionalCalls: directionHits.length,
+        directionalAccuracy: directionHits.length
+          ? directionHits.filter(Boolean).length / directionHits.length * 100
+          : null
+      }];
+    }));
+  }
+
+  function parseTaiwanClosedDates(json) {
+    let rows;
+    if (Array.isArray(json)) {
+      rows = json.map(row => ({
+        date: row?.Date || row?.date || row?.日期,
+        text: [row?.Name, row?.Description, row?.名稱, row?.說明].filter(Boolean).join(' ')
+      }));
+    } else if (Array.isArray(json?.data)) {
+      const fields = json.fields || [];
+      const dateIndex = fields.indexOf('日期');
+      const textIndexes = fields.map((field, index) => /名稱|說明/.test(field) ? index : -1).filter(i => i >= 0);
+      if (dateIndex < 0 || textIndexes.length === 0) throw new Error('TWSE holiday calendar schema is unrecognized.');
+      rows = json.data.map(row => ({ date: row?.[dateIndex], text: textIndexes.map(i => String(row?.[i] || '')).join(' ') }));
+    } else {
+      throw new Error('TWSE holiday calendar response has no data rows.');
+    }
+    const closed = new Set();
+    const open = new Set();
+    for (const row of rows) {
+      const rawDate = String(row.date || '').trim();
+      let match = rawDate.match(/^(\d{3,4})[/-](\d{1,2})[/-](\d{1,2})$/);
+      if (!match) {
+        const compact = rawDate.match(/^(\d{3,4})(\d{2})(\d{2})$/);
+        if (compact) match = compact;
+      }
+      if (!match) continue;
+      let year = Number(match[1]);
+      if (year < 1900) year += 1911;
+      const key = `${year}-${String(match[2]).padStart(2, '0')}-${String(match[3]).padStart(2, '0')}`;
+      if (/補行交易|開市|開始交易|最後交易日|交易日/.test(row.text)) open.add(key);
+      else if (/無交易|休市|放假|停止交易|不交易|補假/.test(row.text)) closed.add(key);
+    }
+    return { closed, open };
+  }
+
+  function isTaiwanTradingDay(date, calendar) {
+    const weekday = new Date(`${date}T12:00:00+08:00`).getUTCDay();
+    if (calendar?.open?.has(date)) return true;
+    if (weekday === 0 || weekday === 6) return false;
+    if (!calendar) return false;
+    return !calendar.closed.has(date);
+  }
+
+  const api = {
+    TIME_ZONES, dateKey, zonedTimeToUtc, exchangeCloseMs, usMarketHolidays, isUsTradingDay, parseYahooChart,
+    normalizeTaiwanSessionDate, parseTwseDailyQuote,
+    validateFxResponse, validateBundle, taiwanSessionsAligned, resolvePrice, formatPriceInput, baseline, verifiedTaiwanBaseline, tickSize, roundToTick,
+    latestCompletedTaiwanSessionDate, taiwanQuoteFreshness,
+    taipeiDateKey, snapshotCutoffMs, taiwanMarketOpenMs, mayCaptureSnapshot,
+    mayRetrieveActualOpen, parseYahooOpenings, appendImmutableRecord, calculateForwardMetrics,
+    parseTaiwanClosedDates, isTaiwanTradingDay
+  };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  root.TSMCMarketData = api;
+})(typeof globalThis !== 'undefined' ? globalThis : window);
