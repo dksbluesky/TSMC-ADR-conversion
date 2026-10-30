@@ -223,6 +223,18 @@
     return null;
   }
 
+  function previousTaiwanTradingDate(targetDate, calendar) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate || '') || !calendar) return null;
+    let date = targetDate;
+    for (let day = 0; day < 31; day++) {
+      const previous = new Date(`${date}T12:00:00+08:00`);
+      previous.setUTCDate(previous.getUTCDate() - 1);
+      date = previous.toISOString().slice(0, 10);
+      if (isTaiwanTradingDay(date, calendar)) return date;
+    }
+    return null;
+  }
+
   function taiwanQuoteFreshness(quote, expectedDate, nowMs = Date.now()) {
     const latest = quote?.latest;
     if (!expectedDate || !Number.isFinite(latest?.price) || latest.price <= 0 ||
@@ -295,6 +307,150 @@
     return Number(rounded.toFixed(decimals));
   }
 
+  function parseFubonTaiwan50Exposure(html, retrievedAtMs = Date.now()) {
+    if (typeof html !== 'string' || !html.trim()) throw new Error('Fubon 006208 holdings page is empty.');
+    if (!Number.isFinite(retrievedAtMs) || retrievedAtMs <= 0 || retrievedAtMs > Date.now() + 1000) {
+      throw new Error('Fubon holdings retrieval timestamp is invalid or future-dated.');
+    }
+    const visibleText = html.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ');
+    const reportText = visibleText.replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ');
+    const dateMatch = reportText.match(/資料日期\s*[:：]\s*(\d{4})\s*[/-]\s*(\d{1,2})\s*[/-]\s*(\d{1,2})/);
+    if (!dateMatch) throw new Error('Fubon holdings report date was not found.');
+    const sessionDate = `${dateMatch[1]}-${String(dateMatch[2]).padStart(2, '0')}-${String(dateMatch[3]).padStart(2, '0')}`;
+    const parsedDate = new Date(`${sessionDate}T00:00:00Z`);
+    if (!Number.isFinite(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== sessionDate) {
+      throw new Error('Fubon holdings report date is invalid.');
+    }
+    const rows = [...visibleText.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)];
+    const matches = [];
+    for (const row of rows) {
+      const cells = [...row[1].matchAll(/<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi)]
+        .map(cell => cell[1].replace(/<[^>]*>/g, ' ').replace(/&nbsp;|&#160;/gi, ' ').trim());
+      if (cells[0] !== '2330') continue;
+      const weightText = cells[cells.length - 1].replace(/[% ,]/g, '');
+      const percent = Number(weightText);
+      if (!Number.isFinite(percent) || percent <= 0 || percent > 100) continue;
+      matches.push(percent / 100);
+    }
+    if (matches.length !== 1) throw new Error('Fubon holdings page has no unique valid 2330 weight.');
+    return {
+      weight: matches[0], sessionDate, retrievedAtMs,
+      source: 'Fubon ETF official 006208 assets page'
+    };
+  }
+
+  function estimateOpeningPrices({ nowMs = Date.now(), targetDate = taipeiDateKey(nowMs), adr, quotes, freshness, exposure, calendar }) {
+    const result = { tw2330: null, twB: null, twC: { status: 'NO_ESTIMATE', reason: 'No validated independent overnight signal is available for 00878.' } };
+    const targetOpenMs = /^\d{4}-\d{2}-\d{2}$/.test(targetDate || '')
+      ? zonedTimeToUtc(targetDate, 9, 0, TIME_ZONES.TW) : NaN;
+    if (!calendar || targetDate !== taipeiDateKey(nowMs) || !isTaiwanTradingDay(targetDate, calendar) ||
+        nowMs >= targetOpenMs) {
+      const reason = 'A new estimate can be captured only before the target Taiwan session opens.';
+      result.tw2330 = { status: 'UNAVAILABLE', reason };
+      result.twB = { status: 'UNAVAILABLE', reason };
+      return result;
+    }
+    const previousTaiwanDate = previousTaiwanTradingDate(targetDate, calendar);
+    if (!previousTaiwanDate) {
+      const reason = 'The target session has no verified previous Taiwan trading close.';
+      result.tw2330 = { status: 'UNAVAILABLE', reason };
+      result.twB = { status: 'UNAVAILABLE', reason };
+      return result;
+    }
+    const previousTaiwanCloseMs = exchangeCloseMs(previousTaiwanDate, 'TW');
+    const adrLatest = adr?.latest;
+    const adrPrevious = adr?.previous;
+    const adrSessionsValid = adr?.market === 'US' &&
+      /^\d{4}-\d{2}-\d{2}$/.test(adrLatest?.sessionDate || '') &&
+      /^\d{4}-\d{2}-\d{2}$/.test(adrPrevious?.sessionDate || '') &&
+      isUsTradingDay(adrLatest.sessionDate) && isUsTradingDay(adrPrevious.sessionDate) &&
+      adrLatest.closeTimestampMs === exchangeCloseMs(adrLatest.sessionDate, 'US') &&
+      adrPrevious.closeTimestampMs === exchangeCloseMs(adrPrevious.sessionDate, 'US');
+    const adrReturn = adrSessionsValid && adrLatest?.price > 0 && adrPrevious?.price > 0 &&
+      Number.isFinite(adrLatest.closeTimestampMs) && Number.isFinite(adrPrevious.closeTimestampMs) &&
+      adrPrevious.closeTimestampMs < adrLatest.closeTimestampMs && adrLatest.closeTimestampMs <= nowMs
+      ? adrLatest.price / adrPrevious.price - 1 : null;
+    const validAdr = Number.isFinite(adrReturn);
+    const makeEstimate = (key, expectedSymbol, priceType, factor = 1) => {
+      const quote = quotes?.[key];
+      const latest = quote?.latest;
+      if (quote?.symbol !== expectedSymbol || freshness?.[key] !== 'FRESH' ||
+          !Number.isFinite(latest?.price) || latest.price <= 0 ||
+          !/^\d{4}-\d{2}-\d{2}$/.test(latest.sessionDate || '') ||
+          !Number.isFinite(latest.closeTimestampMs) || latest.closeTimestampMs > nowMs ||
+          latest.closeTimestampMs !== exchangeCloseMs(latest.sessionDate, 'TW') ||
+          latest.sessionDate !== previousTaiwanDate || latest.closeTimestampMs !== previousTaiwanCloseMs) {
+        return { status: 'UNAVAILABLE', reason: 'Previous Taiwan close is missing, stale, or not session-matched.' };
+      }
+      if (!validAdr || adrLatest.closeTimestampMs <= previousTaiwanCloseMs ||
+          adrLatest.closeTimestampMs >= targetOpenMs || adrLatest.closeTimestampMs > nowMs) {
+        return { status: 'UNAVAILABLE', reason: 'A completed TSM ADR session after the Taiwan baseline is required.' };
+      }
+      const predictedReturn = adrReturn * factor;
+      const unroundedPrice = latest.price * (1 + predictedReturn);
+      const estimatedOpen = roundToTick(unroundedPrice, priceType);
+      if (!Number.isFinite(estimatedOpen)) return { status: 'UNAVAILABLE', reason: 'Forecast price is invalid.' };
+      return {
+        status: 'ESTIMATE', targetDate, previousClose: latest.price, previousCloseDate: latest.sessionDate,
+        previousCloseTimestampMs: latest.closeTimestampMs, previousCloseBarTimestampMs: latest.barTimestampMs,
+        capturedAtMs: nowMs, adrReturn, factor,
+        predictedReturn, changePercent: predictedReturn * 100, estimatedOpen,
+        adrLatest, adrPrevious, adrSource: adr.source || 'Yahoo Finance chart API'
+      };
+    };
+    result.tw2330 = makeEstimate('tw2330', '2330.TW', 'stock');
+    const etf = makeEstimate('twB', '006208.TW', 'etf', exposure?.weight);
+    if (!Number.isFinite(exposure?.weight) || exposure.weight <= 0 || exposure.weight > 1 ||
+        exposure.sessionDate !== previousTaiwanDate ||
+        !Number.isFinite(exposure.retrievedAtMs) || exposure.retrievedAtMs > nowMs) {
+      result.twB = { status: 'UNAVAILABLE', reason: 'A valid 006208 TSMC weight for the previous-close session is unavailable.' };
+    } else if (etf.status === 'ESTIMATE') {
+      result.twB = { ...etf, exposureDate: exposure.sessionDate, exposureWeight: exposure.weight,
+        exposureRetrievedAtMs: exposure.retrievedAtMs, exposureSource: exposure.source };
+    } else result.twB = etf;
+    return result;
+  }
+
+  function validateOpeningForecastSnapshot(snapshot) {
+    const targetDate = snapshot?.targetDate;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate || '') || !Number.isFinite(snapshot?.capturedAtMs) ||
+        snapshot.capturedAtMs >= zonedTimeToUtc(targetDate, 9, 0, TIME_ZONES.TW) ||
+        !snapshot?.forecasts || !['tw2330', 'twB'].some(key => snapshot.forecasts[key]?.status === 'ESTIMATE')) return false;
+    for (const key of ['tw2330', 'twB']) {
+      const item = snapshot.forecasts[key];
+      if (item?.status !== 'ESTIMATE') continue;
+      if (item.targetDate !== targetDate || !Number.isFinite(item.estimatedOpen) || item.estimatedOpen <= 0 ||
+          !Number.isFinite(item.capturedAtMs) || item.capturedAtMs >= zonedTimeToUtc(targetDate, 9, 0, TIME_ZONES.TW) ||
+          !Number.isFinite(item.previousClose) || item.previousClose <= 0 ||
+          !Number.isFinite(item.previousCloseTimestampMs) ||
+          !Number.isFinite(item.adrLatest?.closeTimestampMs) ||
+          item.adrLatest.closeTimestampMs <= item.previousCloseTimestampMs ||
+          item.adrLatest.closeTimestampMs > item.capturedAtMs ||
+          item.adrLatest.closeTimestampMs >= zonedTimeToUtc(targetDate, 9, 0, TIME_ZONES.TW)) return false;
+      if (key === 'twB' && (item.exposureDate !== item.previousCloseDate ||
+          !Number.isFinite(item.exposureWeight) || item.exposureWeight <= 0 || item.exposureWeight > 1)) return false;
+    }
+    return true;
+  }
+
+  function mergeOpeningForecastSnapshot(existing, candidate) {
+    if (!validateOpeningForecastSnapshot(candidate)) return null;
+    if (!validateOpeningForecastSnapshot(existing) || existing.targetDate < candidate.targetDate) return candidate;
+    if (existing.targetDate > candidate.targetDate) return existing;
+    const forecasts = { ...existing.forecasts };
+    let changed = false;
+    for (const key of ['tw2330', 'twB']) {
+      if (forecasts[key]?.status !== 'ESTIMATE' && candidate.forecasts[key]?.status === 'ESTIMATE') {
+        forecasts[key] = candidate.forecasts[key];
+        changed = true;
+      }
+    }
+    if (!changed) return existing;
+    const merged = { ...existing, forecasts };
+    return validateOpeningForecastSnapshot(merged) ? merged : null;
+  }
+
   function taipeiDateKey(timestamp) { return dateKey(timestamp, TIME_ZONES.TW); }
 
   function parseTaiwanClosedDates(json) {
@@ -344,7 +500,9 @@
     TIME_ZONES, dateKey, zonedTimeToUtc, exchangeCloseMs, usMarketHolidays, isUsTradingDay, parseYahooChart,
     normalizeTaiwanSessionDate, parseTwseDailyQuote,
     validateFxResponse, validateBundle, taiwanSessionsAligned, resolvePrice, formatPriceInput, baseline, verifiedTaiwanBaseline, tickSize, roundToTick,
-    latestCompletedTaiwanSessionDate, taiwanQuoteFreshness,
+    latestCompletedTaiwanSessionDate, taiwanQuoteFreshness, previousTaiwanTradingDate,
+    parseFubonTaiwan50Exposure, estimateOpeningPrices, validateOpeningForecastSnapshot,
+    mergeOpeningForecastSnapshot,
     taipeiDateKey,
     parseTaiwanClosedDates, isTaiwanTradingDay
   };

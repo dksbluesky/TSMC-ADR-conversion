@@ -216,6 +216,93 @@ test('stock and ETF price rounding respects Taiwan tick bands', () => {
   assert.equal(Core.roundToTick(52.13, 'etf'), 52.15);
 });
 
+test('Fubon 006208 holdings parser returns the reported TSMC weight and rejects unusable reports', () => {
+  const html = `<div><span>資料日期：</span><span>2026/03/06</span></div><table><tr><th>股票代碼</th><th>股票名稱</th><th>股數</th><th>金額</th><th>權重(%)</th></tr>
+    <tr><td>2330</td><td>台積電</td><td>1,000</td><td>2,000</td><td>57.2285</td></tr></table>`;
+  const exposure = Core.parseFubonTaiwan50Exposure(html, utc('2026-03-09T00:40:00'));
+  assert.ok(Math.abs(exposure.weight - 0.572285) < 1e-12);
+  assert.equal(exposure.sessionDate, '2026-03-06');
+  assert.equal(exposure.source, 'Fubon ETF official 006208 assets page');
+  assert.throws(() => Core.parseFubonTaiwan50Exposure('<div>no holdings</div>', utc('2026-03-09T00:40:00')), /report date/);
+  assert.throws(() => Core.parseFubonTaiwan50Exposure(html.replace('57.2285', '—'), utc('2026-03-09T00:40:00')), /unique valid/);
+  assert.throws(() => Core.parseFubonTaiwan50Exposure(html + html, utc('2026-03-09T00:40:00')), /unique valid/);
+});
+
+test('opening estimates use ADR return and date-matched 006208 exposure, then round to Taiwan ticks', () => {
+  const now = utc('2026-03-09T00:45:00'); // Monday 08:45 Taiwan time
+  const calendar = { closed: new Set(), open: new Set() };
+  const twClose = Core.exchangeCloseMs('2026-03-06', 'TW');
+  const adr = {
+    market: 'US', source: 'Yahoo Finance chart API',
+    previous: { price: 300, sessionDate: '2026-03-05', closeTimestampMs: Core.exchangeCloseMs('2026-03-05', 'US') },
+    latest: { price: 315, sessionDate: '2026-03-06', closeTimestampMs: Core.exchangeCloseMs('2026-03-06', 'US') }
+  };
+  const quotes = {
+    tw2330: { symbol: '2330.TW', latest: { price: 2000, sessionDate: '2026-03-06', closeTimestampMs: twClose } },
+    twB: { symbol: '006208.TW', latest: { price: 250, sessionDate: '2026-03-06', closeTimestampMs: twClose } }
+  };
+  const exposure = { weight: 0.572285, sessionDate: '2026-03-06', retrievedAtMs: now - 1000, source: 'Fubon ETF official 006208 assets page' };
+  const forecasts = Core.estimateOpeningPrices({ adr, quotes, freshness: { tw2330: 'FRESH', twB: 'FRESH' }, exposure, nowMs: now, calendar });
+  assert.equal(forecasts.tw2330.estimatedOpen, 2100);
+  assert.ok(Math.abs(forecasts.tw2330.changePercent - 5) < 1e-10);
+  assert.equal(forecasts.tw2330.previousClose, 2000);
+  assert.equal(forecasts.twB.estimatedOpen, 257.15);
+  assert.ok(Math.abs(forecasts.twB.changePercent - 2.861425) < 1e-10);
+  assert.equal(forecasts.twB.exposureWeight, 0.572285);
+  assert.equal(forecasts.twC.status, 'NO_ESTIMATE');
+  assert.equal(forecasts.tw2330.targetDate, '2026-03-09');
+  assert.equal(Core.previousTaiwanTradingDate('2026-03-09', calendar), '2026-03-06');
+  const snapshot = { targetDate: '2026-03-09', capturedAtMs: now, forecasts };
+  assert.equal(Core.validateOpeningForecastSnapshot(snapshot), true);
+  assert.equal(Core.validateOpeningForecastSnapshot({ ...snapshot, capturedAtMs: utc('2026-03-09T01:00:00') }), false);
+  assert.equal(Core.mergeOpeningForecastSnapshot(null, snapshot), snapshot);
+  assert.equal(Core.mergeOpeningForecastSnapshot(snapshot, snapshot), snapshot);
+  const partial = { ...snapshot, forecasts: { ...forecasts, twB: { status: 'UNAVAILABLE' } } };
+  const merged = Core.mergeOpeningForecastSnapshot(partial, snapshot);
+  assert.equal(merged.forecasts.tw2330, partial.forecasts.tw2330);
+  assert.equal(merged.forecasts.twB.status, 'ESTIMATE');
+  const revised2330 = { ...snapshot, forecasts: { ...forecasts, tw2330: { ...forecasts.tw2330, estimatedOpen: 9999 } } };
+  assert.equal(Core.mergeOpeningForecastSnapshot(snapshot, revised2330), snapshot);
+});
+
+test('opening forecasts reject missing, stale, mismatched, and out-of-window inputs', () => {
+  const now = utc('2026-03-09T00:45:00');
+  const calendar = { closed: new Set(), open: new Set() };
+  const twClose = Core.exchangeCloseMs('2026-03-06', 'TW');
+  const adr = {
+    market: 'US', previous: { price: 300, sessionDate: '2026-03-05', closeTimestampMs: Core.exchangeCloseMs('2026-03-05', 'US') },
+    latest: { price: 315, sessionDate: '2026-03-06', closeTimestampMs: Core.exchangeCloseMs('2026-03-06', 'US') }
+  };
+  const quotes = {
+    tw2330: { symbol: '2330.TW', latest: { price: 2000, sessionDate: '2026-03-06', closeTimestampMs: twClose } },
+    twB: { symbol: '006208.TW', latest: { price: 250, sessionDate: '2026-03-06', closeTimestampMs: twClose } }
+  };
+  const exposure = { weight: 0.57, sessionDate: '2026-03-06', retrievedAtMs: now - 1000 };
+  const base = { quotes, freshness: { tw2330: 'FRESH', twB: 'FRESH' }, exposure, nowMs: now, calendar };
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr: null }).tw2330.status, 'UNAVAILABLE');
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr, freshness: { tw2330: 'STALE', twB: 'STALE' } }).tw2330.status, 'UNAVAILABLE');
+  const mismatched = { ...quotes, twB: { ...quotes.twB, latest: { ...quotes.twB.latest, sessionDate: '2026-03-05' } } };
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr, quotes: mismatched }).twB.status, 'UNAVAILABLE');
+  const oldExposure = { ...exposure, sessionDate: '2026-03-05' };
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr, exposure: oldExposure }).twB.status, 'UNAVAILABLE');
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr, exposure: null }).twB.status, 'UNAVAILABLE');
+  const oldAdr = { ...adr,
+    previous: { price: 295, sessionDate: '2026-03-04', closeTimestampMs: Core.exchangeCloseMs('2026-03-04', 'US') },
+    latest: { ...adr.latest, price: 300, sessionDate: '2026-03-05', closeTimestampMs: Core.exchangeCloseMs('2026-03-05', 'US') }
+  };
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr: oldAdr }).tw2330.status, 'UNAVAILABLE');
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr, freshness: { tw2330: 'MANUAL', twB: 'MANUAL' } }).tw2330.status, 'UNAVAILABLE');
+  const afterOpen = Core.estimateOpeningPrices({ ...base, adr, nowMs: utc('2026-03-09T01:05:00') });
+  assert.equal(afterOpen.tw2330.status, 'UNAVAILABLE');
+  const targetMismatch = Core.estimateOpeningPrices({ ...base, adr, targetDate: '2026-03-10' });
+  assert.equal(targetMismatch.tw2330.status, 'UNAVAILABLE');
+  const postOpenCloses = {
+    tw2330: { symbol: '2330.TW', latest: { price: 2050, sessionDate: '2026-03-09', closeTimestampMs: Core.exchangeCloseMs('2026-03-09', 'TW') } },
+    twB: { symbol: '006208.TW', latest: { price: 255, sessionDate: '2026-03-09', closeTimestampMs: Core.exchangeCloseMs('2026-03-09', 'TW') } }
+  };
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr, quotes: postOpenCloses, nowMs: utc('2026-03-09T06:00:00') }).tw2330.status, 'UNAVAILABLE');
+});
+
 test('service worker installs the changed app shell and activates the new cache version', async () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'service-worker.js'), 'utf8');
   const handlers = {};
@@ -236,11 +323,11 @@ test('service worker installs the changed app shell and activates the new cache 
   let installPromise;
   handlers.install({ waitUntil: promise => { installPromise = promise; } });
   await installPromise;
-  assert.equal(added[0].name, 'tsmc-adr-shell-v4');
+  assert.equal(added[0].name, 'tsmc-adr-shell-v5');
   assert.ok(added[0].files.includes('./app.jsx'));
   assert.ok(added[0].files.includes('./market-data.js'));
   let activatePromise;
   handlers.activate({ waitUntil: promise => { activatePromise = promise; } });
   await activatePromise;
-  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3'].sort());
+  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4'].sort());
 });
