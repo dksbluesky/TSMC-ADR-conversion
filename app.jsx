@@ -281,48 +281,69 @@ function App() {
       hourCycle: 'h23'
     }).format(timestamp) + (market === 'US' ? ' ET' : ' 台灣時間') : '—';
   const pct = value => Number.isFinite(value) ? `${value > 0 ? '+' : ''}${value.toFixed(2)}%` : '—';
+  const targetPreviousTaiwanDate = Core.previousTaiwanTradingDate(currentTaiwanDate, calendar);
+  const priorCloseForCard = (key, forecast) => {
+    if (forecast?.status === 'ESTIMATE') return {
+      price: forecast.previousClose, date: forecast.previousCloseDate, label: '預估基準前收', source: '已驗證'
+    };
+    if (taiwanFreshness[key] === 'MANUAL' && Number.isFinite(inputs[key]?.price)) return {
+      price: inputs[key].price, date: '', label: '手動前收', source: '手動備援'
+    };
+    const quote = bundle[key];
+    const candidate = quote?.latest?.sessionDate === currentTaiwanDate ? quote?.previous : quote?.latest;
+    const candidateQuote = candidate ? { ...quote, latest: candidate } : null;
+    if (Core.taiwanQuoteFreshness(candidateQuote, targetPreviousTaiwanDate, clock) !== 'FRESH') return null;
+    return { price: candidate.price, date: candidate.sessionDate, label: '已驗證前收', source: '已驗證' };
+  };
   const estimateCard = (symbol, name, forecast, key) => {
     const isEstimate = forecast?.status === 'ESTIMATE';
-    const isEtf = key === 'twB';
     const historical = isEstimate && (forecast.targetDate !== currentTaiwanDate ||
       clock >= Core.zonedTimeToUtc(forecast.targetDate, 9, 0, Core.TIME_ZONES.TW));
     const changeClass = forecast?.changePercent > 0 ? 'text-up' : forecast?.changePercent < 0 ? 'text-down' : 'text-slate-700';
+    const previousClose = priorCloseForCard(key, forecast);
+    const unavailableText = key === 'twC' ? '無預估模型' : '尚無有效估計';
+    return <article key={symbol} className="forecast-card glass-panel p-4 rounded-xl flex flex-col">
+      <div className="flex justify-between items-start gap-2 min-w-0">
+        <h3 className="font-bold text-slate-900 min-w-0">{symbol} <span className="font-medium">{name}</span></h3>
+        <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] leading-tight font-medium ${isEstimate ? 'bg-slate-100 text-slate-600' : 'bg-slate-50 text-slate-500'}`}>
+          {isEstimate ? historical ? '歷史估計' : '暫定估計' : '暫無估計'}
+        </span>
+      </div>
+      <div className="forecast-main mt-3">
+        {isEstimate ? <>
+          <div className="forecast-price text-3xl font-mono font-bold text-slate-950 leading-none" aria-label={`估計開盤價 ${fmt(forecast.estimatedOpen)}`}>{fmt(forecast.estimatedOpen)}</div>
+          <div className={`mt-2 text-sm font-semibold ${changeClass}`}>{pct(forecast.changePercent)}</div>
+        </> : <div className="forecast-state text-sm font-semibold text-slate-500">{unavailableText}</div>}
+      </div>
+      <div className="forecast-baseline mt-auto pt-3 border-t border-slate-100 flex items-end justify-between gap-2">
+        <div className="text-xs text-slate-500">{previousClose?.label || '前收尚未驗證'}
+          {previousClose?.date && <span className="block mt-0.5 text-[11px]">{previousClose.date.replace(/-/g, '/')}</span>}
+          {previousClose?.source === '手動備援' && <span className="block mt-0.5 text-[11px]">手動備援</span>}
+        </div>
+        <div className="text-base font-mono font-semibold tabular-nums text-slate-700">{previousClose ? fmt(previousClose.price) : '—'}</div>
+      </div>
+    </article>;
+  };
+  const forecastDetails = (symbol, name, forecast, key) => {
+    const isEstimate = forecast?.status === 'ESTIMATE';
+    const isEtf = key === 'twB';
     const adrText = isEstimate
       ? `TSM ADR：${fmt(forecast.adrPrevious.price)}（${forecast.adrPrevious.sessionDate}，${exactMarketCloseTime(forecast.adrPrevious.closeTimestampMs, 'US')}）→ ${fmt(forecast.adrLatest.price)}（${forecast.adrLatest.sessionDate}，${exactMarketCloseTime(forecast.adrLatest.closeTimestampMs, 'US')}）`
       : '';
-    const detailsId = `forecast-details-${symbol.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
-    return <article key={symbol} className="forecast-card glass-panel p-4 rounded-xl flex flex-col gap-2">
-      <div className="flex justify-between items-start gap-2 min-w-0">
-        <h3 className="font-bold text-slate-900 min-w-0">{symbol} <span className="font-medium">{name}</span></h3>
-        <span className={`shrink-0 rounded-full px-2 py-1 text-[11px] leading-tight font-semibold ${isEstimate ? historical ? 'bg-slate-100 text-slate-600' : 'bg-blue-50 text-blue-800' : forecast?.status === 'NO_ESTIMATE' ? 'bg-amber-50 text-amber-800' : 'bg-slate-100 text-slate-600'}`}>
-          {isEstimate ? `${historical ? '歷史估計' : '暫定估計'}｜${forecast.targetDate}` : forecast?.status === 'NO_ESTIMATE' ? '無模型' : '不可用'}
-        </span>
-      </div>
+    return <article key={symbol} className="rounded-lg bg-slate-50 p-3 space-y-2 text-xs text-slate-600 leading-relaxed">
+      <h3 className="font-semibold text-slate-800">{symbol} {name}</h3>
       {isEstimate ? <>
-        <div className="forecast-price text-4xl font-mono font-bold text-slate-950 leading-none py-1" aria-label={`估計開盤價 ${fmt(forecast.estimatedOpen)}`}>{fmt(forecast.estimatedOpen)}</div>
-        <div className={`text-sm font-semibold ${changeClass}`}>相對前收 {pct(forecast.changePercent)}</div>
-        <div className="text-xs text-slate-600">前收 {fmt(forecast.previousClose)} <span className="text-slate-500">｜{forecast.previousCloseDate}</span></div>
-      </> : <>
-        <div className="forecast-price text-xl font-semibold text-slate-500 leading-tight">No Estimate</div>
-        <p className="text-xs text-slate-600 leading-relaxed">{forecast?.reason || '行情資料尚未驗證。'}</p>
-      </>}
-      <details className="mt-auto border-t border-slate-100 pt-1">
-        <summary className="disclosure-summary text-xs font-medium text-slate-600" aria-controls={detailsId}>計算、假設與來源</summary>
-        <div id={detailsId} className="space-y-2 pb-1 text-xs text-slate-600 leading-relaxed">
-          {isEstimate ? <>
-            <p>估計建立於：{exactMarketCloseTime(forecast.capturedAtMs, 'TW')}；目標交易日：{forecast.targetDate}。前收時間：{exactMarketCloseTime(forecast.previousCloseTimestampMs, 'TW')}。</p>
-            <p>公式：{isEtf
-              ? `前收 × [1 + ADR 報酬率 × TSMC 權重（${(forecast.exposureWeight * 100).toFixed(2)}%）]`
-              : '前收 × (1 + TSM ADR 隔夜報酬率)'}</p>
-            <p>ADR 隔夜報酬：{pct(forecast.adrReturn * 100)}。{adrText}</p>
-            {isEtf && <p>權重來源：富邦投信 006208 持股；資料日 {forecast.exposureDate}；擷取 {exactMarketCloseTime(forecast.exposureRetrievedAtMs, 'TW')}。來源：<a className="source-link" href="https://www.fubon.com/asset-management/fund/info/006208" target="_blank" rel="noreferrer">富邦投信 006208</a>。</p>}
-            <p>假設：{isEtf
-              ? 'TSMC 隔夜報酬僅按基金當日 TSMC 持股權重傳導；其他成分股、匯率、追蹤誤差及折溢價變動視為 0。'
-              : '假設 TSMC 普通股與 ADR 隔夜百分比報酬 1:1；未以 ADR 折算價推估。'} USD/TWD 變動未納入；Yahoo 日線時間戳是 K 棒時間，收盤時點依交易時段推算，非來源發布時間。尚未經回測驗證。</p>
-          </> : <p>此標的目前沒有可用的開盤估計；前收價不會代替估計價格。</p>}
-          <p>市場資料來源：<a className="source-link" href="https://query1.finance.yahoo.com/v8/finance/chart/TSM" target="_blank" rel="noreferrer">Yahoo Finance Chart API</a>；台股收盤與交易日資料：<a className="source-link" href="https://www.twse.com.tw/" target="_blank" rel="noreferrer">TWSE</a>。</p>
-        </div>
-      </details>
+        <p>估計建立於：{exactMarketCloseTime(forecast.capturedAtMs, 'TW')}；目標交易日：{forecast.targetDate}。前收 {fmt(forecast.previousClose)}，日期 {forecast.previousCloseDate}，時間 {exactMarketCloseTime(forecast.previousCloseTimestampMs, 'TW')}。</p>
+        <p>公式：{isEtf
+          ? `前收 × [1 + ADR 報酬率 × TSMC 權重（${(forecast.exposureWeight * 100).toFixed(2)}%）]`
+          : '前收 × (1 + TSM ADR 隔夜報酬率)'}</p>
+        <p>ADR 隔夜報酬：{pct(forecast.adrReturn * 100)}。{adrText}</p>
+        {isEtf && <p>權重來源：富邦投信 006208 持股；資料日 {forecast.exposureDate}；擷取 {exactMarketCloseTime(forecast.exposureRetrievedAtMs, 'TW')}。來源：<a className="source-link" href="https://www.fubon.com/asset-management/fund/info/006208" target="_blank" rel="noreferrer">富邦投信 006208</a>。</p>}
+        <p>假設：{isEtf
+          ? 'TSMC 隔夜報酬僅按基金當日 TSMC 持股權重傳導；其他成分股、匯率、追蹤誤差及折溢價變動視為 0。'
+          : '假設 TSMC 普通股與 ADR 隔夜百分比報酬 1:1；未以 ADR 折算價推估。'} USD/TWD 變動未納入；Yahoo 日線時間戳是 K 棒時間，收盤時點依交易時段推算，非來源發布時間。尚未經回測驗證。</p>
+      </> : <p>{forecast?.reason || (key === 'twC' ? '此標的目前沒有可用的獨立隔夜市場訊號。' : '尚未保存符合目標交易日與時段條件的開盤估計。')}</p>}
+      <p>市場資料來源：<a className="source-link" href="https://query1.finance.yahoo.com/v8/finance/chart/TSM" target="_blank" rel="noreferrer">Yahoo Finance Chart API</a>；台股收盤與交易日資料：<a className="source-link" href="https://www.twse.com.tw/" target="_blank" rel="noreferrer">TWSE</a>。</p>
     </article>;
   };
   const quoteSource = key => inputs[key]?.source === '手動輸入'
@@ -343,27 +364,24 @@ function App() {
 
   return (
     <div className="page-shell min-h-screen p-4 md:p-8 max-w-7xl mx-auto">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-5 pb-4 border-b border-slate-300 gap-3">
-        <div className="min-w-0"><h1 className="text-xl font-bold text-slate-900">台積電 ADR 行情推算機</h1>
-          <p className="text-xs text-slate-500 mt-1">台股暫定開盤估計（未經回測驗證）</p></div>
-        <button onClick={runAutoSync} disabled={loading} className="btn-live text-white px-5 py-2 rounded-lg font-semibold min-w-[140px] w-full sm:w-auto">
-          {loading ? '同步中…' : '↻ 強制重抓'}
-        </button>
-      </div>
+      <header className="app-header flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+        <div className="min-w-0">
+          <h1 className="text-lg font-bold text-slate-900">台股開盤預估</h1>
+          <p className="text-xs text-slate-500 mt-1">Target session · {currentTaiwanDate.replace(/-/g, '/')}</p>
+        </div>
+        <div className="header-controls flex items-center gap-2">
+          <span className="compact-status" title={loading ? '正在讀取資料來源' : completeSync ? '行情資料已通過驗證' : '行情資料尚未完整通過驗證'}>
+            <span className={`status-dot ${loading ? 'status-yellow' : completeSync ? 'status-green' : 'status-red'}`}></span>
+            {loading ? '同步中' : completeSync ? '資料完整' : '部分資料'}
+          </span>
+          <span className="provisional-label">暫定模型</span>
+          <button onClick={runAutoSync} disabled={loading} className="btn-live text-white px-3 py-2 rounded-lg text-sm font-semibold min-w-[88px]">
+            {loading ? '同步中…' : '↻ 重整'}
+          </button>
+        </div>
+      </header>
 
-      <div className="bg-white text-sm px-4 py-3 rounded-lg mb-5 border border-slate-200">
-        <span className={`status-dot ${loading ? 'status-yellow' : completeSync ? 'status-green' : 'status-red'}`}></span>
-        <span>{loading ? '正在讀取資料來源…' : completeSync
-          ? (tickers.b === '006208' ? '行情、匯率與 006208 權重來源均通過驗證' : '行情與匯率來源均通過驗證')
-          : '行情部分未通過新鮮度驗證；各標的狀態如下，可使用手動備援'}</span>
-        {lastUpdated && <span className="text-slate-500 text-xs ml-2">(檢查於 {lastUpdated.toLocaleTimeString('zh-TW')})</span>}
-        {errors.map(error => <div key={error} className="text-red-700 text-xs mt-1">{error}</div>)}
-        {calendarError && <div className="text-red-700 text-xs mt-1">{calendarError}</div>}
-      </div>
-
-      <section className="mb-6" aria-labelledby="forecast-heading">
-        <div className="mb-3"><h2 id="forecast-heading" className="font-bold text-slate-900">台灣暫定開盤估計</h2>
-          <p className="text-xs text-slate-500 mt-1">只在目標開盤前以已驗證資料建立；開盤後保留該目標日的歷史估計，不以開盤後資料重算。不是已驗證的預測模型。</p></div>
+      <section className="mb-4" aria-label="台股開盤預估卡片">
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
           {estimateCard('2330', '台積電', forecasts.tw2330, 'tw2330')}
           {estimateCard(tickers.b, '富邦台50', forecasts.twB, 'twB')}
@@ -371,8 +389,38 @@ function App() {
         </div>
       </section>
 
+      <section className="market-overview grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-3 mb-4" aria-label="隔夜市場與資料狀態">
+        <div className="market-summary glass-panel rounded-xl p-3 md:p-4">
+          <h2 className="text-xs font-semibold text-slate-500 mb-2">隔夜市場</h2>
+          <div className="grid grid-cols-3 gap-2">
+            <div><div className="summary-label">TSM ADR</div><div className="summary-value">{fmt(inputs.adr?.price)}</div></div>
+            <div><div className="summary-label">ADR 隔夜變動</div><div className={`summary-value ${adrOvernightMove > 0 ? 'text-up' : adrOvernightMove < 0 ? 'text-down' : ''}`}>{Number.isFinite(adrOvernightMove) ? `${adrOvernightMove > 0 ? '+' : ''}${adrOvernightMove.toFixed(2)}%` : '—'}</div></div>
+            <div><div className="summary-label">USD/TWD 參考</div><div className="summary-value">{fmt(inputs.fx?.price)}</div></div>
+          </div>
+        </div>
+        <div className="data-summary glass-panel rounded-xl p-3 md:p-4">
+          <h2 className="text-xs font-semibold text-slate-500 mb-2">資料與模型</h2>
+          <div className="data-summary-row"><span>行情驗證</span><strong>{loading ? '同步中' : completeSync ? '完整' : '部分'}</strong></div>
+          <div className="data-summary-row"><span>估計狀態</span><strong>暫定・未回測</strong></div>
+        </div>
+      </section>
+
+      <details className="glass-panel rounded-xl px-4 md:px-5 mb-3">
+        <summary className="disclosure-summary font-semibold text-slate-800">估計公式、假設與資料時間</summary>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 pb-4">
+          {forecastDetails('2330', '台積電', forecasts.tw2330, 'tw2330')}
+          {forecastDetails(tickers.b, '富邦台50', forecasts.twB, 'twB')}
+          {forecastDetails(tickers.c, '國泰永續高股息', forecasts.twC, 'twC')}
+        </div>
+      </details>
+
       <details className="glass-panel rounded-xl px-4 md:px-5 mb-4">
-        <summary className="disclosure-summary font-semibold text-slate-800">市場資料、來源與手動覆寫</summary>
+        <summary className="disclosure-summary font-semibold text-slate-800">行情來源、驗證與手動覆寫</summary>
+        {(errors.length > 0 || calendarError) && <div className="pb-3 text-xs text-rose-700">
+          {errors.map(error => <div key={error}>{error}</div>)}
+          {calendarError && <div>{calendarError}</div>}
+        </div>}
+        {lastUpdated && <p className="pb-3 text-xs text-slate-500">最近檢查：{new Intl.DateTimeFormat('zh-TW', { timeZone: 'Asia/Taipei', dateStyle: 'short', timeStyle: 'medium', hourCycle: 'h23' }).format(lastUpdated)}</p>}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pb-4">
           <section className="bg-slate-50 border border-slate-100 p-4 rounded-lg space-y-3 min-w-0">
             <h3 className="text-slate-900 font-bold">美股 ADR (TSM) 與匯率</h3>

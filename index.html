@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#2563eb">
     <link rel="manifest" href="./manifest.webmanifest">
     <link rel="apple-touch-icon" href="./icons/icon-192.png">
-    <title>📊 台積電 ADR 行情推算機 (V26.1 RWD優化版)</title>
+    <title>台股開盤預估</title>
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="./market-data.js"></script>
@@ -23,7 +23,19 @@
         .btn-live:hover { background: #1e40af; }
         :focus-visible { outline: 3px solid #2563eb; outline-offset: 2px; }
         .forecast-card { min-width: 0; overflow-wrap: anywhere; }
-        .forecast-price { font-variant-numeric: tabular-nums; letter-spacing: -0.04em; }
+        .forecast-card { min-height: 160px; }
+        .forecast-price, .summary-value, .forecast-baseline > div:last-child { font-variant-numeric: tabular-nums; }
+        .forecast-price { letter-spacing: -0.04em; }
+        .forecast-main { min-height: 36px; }
+        .forecast-state { min-height: 24px; }
+        .app-header { margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid #e2e8f0; }
+        .header-controls { flex-wrap: wrap; justify-content: flex-end; }
+        .compact-status { color: #64748b; font-size: 0.75rem; white-space: nowrap; }
+        .provisional-label { color: #64748b; background: #f1f5f9; border-radius: 9999px; padding: 0.25rem 0.5rem; font-size: 0.6875rem; white-space: nowrap; }
+        .summary-label { color: #64748b; font-size: 0.6875rem; }
+        .summary-value { color: #334155; font-size: 1.125rem; font-weight: 600; margin-top: 0.125rem; }
+        .data-summary-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; font-size: 0.75rem; line-height: 1.5; color: #64748b; }
+        .data-summary-row strong { color: #475569; font-weight: 600; text-align: right; }
         .disclosure-summary { min-height: 44px; cursor: pointer; display: flex; align-items: center; }
         .disclosure-summary::marker { color: #64748b; }
         .source-link { color: #1d4ed8; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
@@ -40,9 +52,9 @@
 
         /* 狀態燈號 */
         .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-        .status-green { background-color: #4ade80; box-shadow: 0 0 5px #4ade80; }
-        .status-yellow { background-color: #facc15; animation: pulse 1s infinite; }
-        .status-red { background-color: #f87171; }
+        .status-green { background-color: #6b9b7b; }
+        .status-yellow { background-color: #c6a95c; }
+        .status-red { background-color: #be7777; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
     </style>
 </head>
