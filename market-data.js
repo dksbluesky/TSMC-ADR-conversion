@@ -248,7 +248,7 @@
     if (value === '' || value === null || value === undefined) return '';
     const number = Number(value);
     if (!Number.isFinite(number) || number <= 0) return String(value);
-    if (kind === 'fx') return number.toFixed(5).replace(/\.?0+$/, '');
+    if (kind === 'fx') return number.toFixed(2);
     return number.toFixed(2);
   }
 
@@ -296,101 +296,6 @@
   }
 
   function taipeiDateKey(timestamp) { return dateKey(timestamp, TIME_ZONES.TW); }
-
-  function snapshotCutoffMs(date) {
-    return zonedTimeToUtc(date, 8, 45, TIME_ZONES.TW);
-  }
-
-  function taiwanMarketOpenMs(date) {
-    return zonedTimeToUtc(date, 9, 0, TIME_ZONES.TW);
-  }
-
-  function mayCaptureSnapshot(nowMs, tradingDay, dataValid, savedSnapshot, latestInputTimestamp = 0) {
-    if (!tradingDay || !dataValid) return false;
-    const date = taipeiDateKey(nowMs);
-    if (savedSnapshot?.targetDate === date) return false;
-    return nowMs >= snapshotCutoffMs(date) && nowMs < taiwanMarketOpenMs(date) &&
-      latestInputTimestamp <= nowMs;
-  }
-
-  function mayRetrieveActualOpen(nowMs, targetDate) {
-    return /^\d{4}-\d{2}-\d{2}$/.test(targetDate || '') &&
-      nowMs >= taiwanMarketOpenMs(targetDate) + 60 * 1000;
-  }
-
-  function parseYahooOpenings(json, market, targetDates, nowMs = Date.now()) {
-    const result = json?.chart?.result?.[0];
-    const timestamps = result?.timestamp;
-    const opens = result?.indicators?.quote?.[0]?.open;
-    if (!Array.isArray(timestamps) || !Array.isArray(opens) || market !== 'TW') {
-      throw new Error('Yahoo response is missing Taiwan daily timestamps or opening prices.');
-    }
-    const wanted = new Set(targetDates || []);
-    const found = {};
-    for (let i = 0; i < Math.min(timestamps.length, opens.length); i++) {
-      const timestamp = Number(timestamps[i]) * 1000;
-      const price = Number(opens[i]);
-      if (!Number.isFinite(timestamp) || !Number.isFinite(price) || price <= 0) continue;
-      const sessionDate = dateKey(timestamp, TIME_ZONES.TW);
-      if (!wanted.has(sessionDate) || !mayRetrieveActualOpen(nowMs, sessionDate)) continue;
-      found[sessionDate] = {
-        price,
-        sessionDate,
-        barTimestampMs: timestamp,
-        retrievedAtMs: nowMs
-      };
-    }
-    return found;
-  }
-
-  function appendImmutableRecord(records, record, key = 'targetDate') {
-    const current = Array.isArray(records) ? records : [];
-    if (!record || !record[key] || current.some(item => item?.[key] === record[key])) return current;
-    return [...current, record];
-  }
-
-  function calculateForwardMetrics(snapshots, outcomes, expectedSymbols = {}) {
-    const outcomeByDate = new Map();
-    for (const item of Array.isArray(outcomes) ? outcomes : []) {
-      if (!item?.targetDate) continue;
-      const merged = outcomeByDate.get(item.targetDate) || { actualOpen: {}, symbols: {} };
-      Object.assign(merged.actualOpen, item.actualOpen || {});
-      Object.assign(merged.symbols, item.symbols || {});
-      outcomeByDate.set(item.targetDate, merged);
-    }
-    const fields = ['tw2330', 'twB', 'twC'];
-    return Object.fromEntries(fields.map(field => {
-      const errors = [];
-      const directionHits = [];
-      for (const snapshot of Array.isArray(snapshots) ? snapshots : []) {
-        const outcome = outcomeByDate.get(snapshot?.targetDate);
-        if (field !== 'tw2330') {
-          const defaultSymbol = field === 'twB' ? '006208' : '00878';
-          const snapshotSymbol = snapshot?.symbols?.[field] || defaultSymbol;
-          const outcomeSymbol = outcome?.symbols?.[field] || snapshotSymbol;
-          const expectedSymbol = expectedSymbols[field] || defaultSymbol;
-          if (snapshotSymbol !== expectedSymbol || outcomeSymbol !== expectedSymbol) continue;
-        }
-        const previousClose = Number(snapshot?.prices?.[field]);
-        const predicted = Number(snapshot?.predictions?.[field] ?? previousClose);
-        const actual = Number(outcome?.actualOpen?.[field]);
-        if (!Number.isFinite(predicted) || predicted <= 0 || !Number.isFinite(actual) || actual <= 0) continue;
-        errors.push(Math.abs(predicted - actual));
-        const predictedDirection = Math.sign(predicted - previousClose);
-        if (predictedDirection) {
-          directionHits.push(Math.sign(actual - previousClose) === predictedDirection);
-        }
-      }
-      return [field, {
-        validObservations: errors.length,
-        mae: errors.length ? errors.reduce((sum, value) => sum + value, 0) / errors.length : null,
-        directionalCalls: directionHits.length,
-        directionalAccuracy: directionHits.length
-          ? directionHits.filter(Boolean).length / directionHits.length * 100
-          : null
-      }];
-    }));
-  }
 
   function parseTaiwanClosedDates(json) {
     let rows;
@@ -440,8 +345,7 @@
     normalizeTaiwanSessionDate, parseTwseDailyQuote,
     validateFxResponse, validateBundle, taiwanSessionsAligned, resolvePrice, formatPriceInput, baseline, verifiedTaiwanBaseline, tickSize, roundToTick,
     latestCompletedTaiwanSessionDate, taiwanQuoteFreshness,
-    taipeiDateKey, snapshotCutoffMs, taiwanMarketOpenMs, mayCaptureSnapshot,
-    mayRetrieveActualOpen, parseYahooOpenings, appendImmutableRecord, calculateForwardMetrics,
+    taipeiDateKey,
     parseTaiwanClosedDates, isTaiwanTradingDay
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

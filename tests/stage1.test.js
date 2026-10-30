@@ -125,8 +125,6 @@ test('mixed fresh and stale Taiwan closes retain only the independently verified
     tw2330: tw2330.latest.price, twB: twB.latest.price, twC: twC.latest.price
   }, { tw2330: 'FRESH', twB: 'STALE', twC: 'STALE' });
   assert.deepEqual(baseline, { tw2330: 2415, twB: null, twC: null });
-  assert.equal(Core.mayCaptureSnapshot(Core.snapshotCutoffMs('2026-10-30'), true,
-    Boolean(baseline?.tw2330), null, Core.snapshotCutoffMs('2026-10-30') - 1), true);
   assert.equal(Core.taiwanQuoteFreshness(null, expected, now), 'UNAVAILABLE');
 });
 
@@ -189,73 +187,20 @@ test('price inputs format floating-point source values without rounding calculat
   assert.equal(Core.formatPriceInput(431.80999755859375), '431.81');
   assert.equal(Core.formatPriceInput(249.05000305), '249.05');
   assert.equal(Core.formatPriceInput(35.65000152), '35.65');
-  assert.equal(Core.formatPriceInput(32.55178, 'fx'), '32.55178');
-  assert.equal(Core.formatPriceInput(32.5, 'fx'), '32.5');
+  assert.equal(Core.formatPriceInput(32.55178, 'fx'), '32.55');
+  assert.equal(Core.formatPriceInput(32.5, 'fx'), '32.50');
+  const manualFx = Core.resolvePrice('32.55178', 1, 32.5, 2);
+  const automaticFx = Core.resolvePrice('', null, 32.55178, 2);
+  assert.equal(manualFx.price, 32.55178);
+  assert.equal(automaticFx.price, 32.55178);
+  assert.equal(Core.formatPriceInput(manualFx.price, 'fx'), '32.55');
+  assert.equal(Core.formatPriceInput(automaticFx.price, 'fx'), '32.55');
+  assert.equal((431.81 / 5) * automaticFx.price, 2811.23682436);
+  assert.notEqual((431.81 / 5) * automaticFx.price, (431.81 / 5) * 32.55);
   const rawManual = '431.80999755859375';
   assert.deepEqual(Core.resolvePrice(rawManual, 1, 430, 2), {
     price: 431.80999755859375, timestampMs: 1, source: '手動輸入'
   });
-});
-
-test('08:45 snapshot cutoff, trading day, valid data, timestamps, and immutable saved record are enforced', () => {
-  const cutoff = Core.snapshotCutoffMs('2026-03-09');
-  assert.equal(Core.mayCaptureSnapshot(cutoff - 1, true, true, null, cutoff - 10), false);
-  assert.equal(Core.mayCaptureSnapshot(cutoff, true, true, null, cutoff - 10), true);
-  assert.equal(Core.mayCaptureSnapshot(cutoff + 31_000, true, true, null, cutoff - 10), true);
-  assert.equal(Core.mayCaptureSnapshot(Core.taiwanMarketOpenMs('2026-03-09') - 1,
-    true, true, null, cutoff - 10), true);
-  assert.equal(Core.mayCaptureSnapshot(Core.taiwanMarketOpenMs('2026-03-09'),
-    true, true, null, cutoff - 10), false);
-  assert.equal(Core.mayCaptureSnapshot(cutoff + 1_000, false, true, null, cutoff - 10), false);
-  assert.equal(Core.mayCaptureSnapshot(cutoff + 1_000, true, false, null, cutoff - 10), false);
-  assert.equal(Core.mayCaptureSnapshot(cutoff + 1_000, true, true, null, cutoff + 2_000), false);
-  assert.equal(Core.mayCaptureSnapshot(cutoff + 1_000, true, true, { targetDate: '2026-03-09' }, cutoff - 10), false);
-  assert.equal(Core.mayCaptureSnapshot(Core.snapshotCutoffMs('2026-03-10'), true, true,
-    { targetDate: '2026-03-09' }, Core.snapshotCutoffMs('2026-03-10') - 1), true);
-});
-
-test('actual Taiwan opens are accepted only after the target session opens', () => {
-  const openAt = Core.taiwanMarketOpenMs('2026-03-09');
-  assert.equal(Core.mayRetrieveActualOpen(openAt + 59_999, '2026-03-09'), false);
-  assert.equal(Core.mayRetrieveActualOpen(openAt + 60_000, '2026-03-09'), true);
-  const json = { chart: { result: [{
-    timestamp: [utc('2026-03-09T01:00:00') / 1000],
-    indicators: { quote: [{ open: [2005] }] }
-  }] } };
-  assert.deepEqual(Core.parseYahooOpenings(json, 'TW', ['2026-03-09'], openAt + 60_000), {
-    '2026-03-09': {
-      price: 2005,
-      sessionDate: '2026-03-09',
-      barTimestampMs: utc('2026-03-09T01:00:00'),
-      retrievedAtMs: openAt + 60_000
-    }
-  });
-  assert.deepEqual(Core.parseYahooOpenings(json, 'TW', ['2026-03-09'], openAt), {});
-});
-
-test('forward outcomes append once and calculate baseline MAE without inventing directional calls', () => {
-  const snapshots = [{ targetDate: '2026-03-09', prices: { tw2330: 2000, twB: 50, twC: 20 } }];
-  const outcome = { outcomeKey: '2026-03-09:tw2330', targetDate: '2026-03-09',
-    symbols: { tw2330: '2330' }, actualOpen: { tw2330: 2010 } };
-  let appended = Core.appendImmutableRecord([], outcome, 'outcomeKey');
-  assert.equal(Core.appendImmutableRecord(appended, { ...outcome, actualOpen: { tw2330: 1 } }, 'outcomeKey'), appended);
-  appended = Core.appendImmutableRecord(appended, {
-    outcomeKey: '2026-03-09:twB', targetDate: '2026-03-09',
-    symbols: { twB: '006208' }, actualOpen: { twB: 50.5 }
-  }, 'outcomeKey');
-  const metrics = Core.calculateForwardMetrics(snapshots, appended, { twB: '006208', twC: '00878' });
-  assert.equal(metrics.tw2330.validObservations, 1);
-  assert.equal(metrics.tw2330.mae, 10);
-  assert.equal(metrics.tw2330.directionalCalls, 0);
-  assert.equal(metrics.tw2330.directionalAccuracy, null);
-  assert.equal(metrics.twB.validObservations, 1);
-  assert.equal(metrics.twB.mae, 0.5);
-
-  const directional = Core.calculateForwardMetrics([
-    { targetDate: '2026-03-09', prices: { tw2330: 2000 }, predictions: { tw2330: 2005 } }
-  ], appended);
-  assert.equal(directional.tw2330.directionalCalls, 1);
-  assert.equal(directional.tw2330.directionalAccuracy, 100);
 });
 
 test('stock and ETF price rounding respects Taiwan tick bands', () => {
@@ -283,7 +228,7 @@ test('service worker installs the changed app shell and activates the new cache 
   };
   const caches = {
     open: async name => ({ addAll: async files => { added.push({ name, files }); }, put: async () => {} }),
-    keys: async () => ['tsmc-adr-shell-v2', 'another-cache', 'tsmc-adr-shell-v3'],
+    keys: async () => ['tsmc-adr-shell-v2', 'another-cache', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4'],
     delete: async key => { deleted.push(key); return true; },
     match: async () => null
   };
@@ -291,11 +236,11 @@ test('service worker installs the changed app shell and activates the new cache 
   let installPromise;
   handlers.install({ waitUntil: promise => { installPromise = promise; } });
   await installPromise;
-  assert.equal(added[0].name, 'tsmc-adr-shell-v3');
+  assert.equal(added[0].name, 'tsmc-adr-shell-v4');
   assert.ok(added[0].files.includes('./app.jsx'));
   assert.ok(added[0].files.includes('./market-data.js'));
   let activatePromise;
   handlers.activate({ waitUntil: promise => { activatePromise = promise; } });
   await activatePromise;
-  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2'].sort());
+  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3'].sort());
 });
