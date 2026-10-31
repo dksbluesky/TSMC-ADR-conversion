@@ -485,7 +485,7 @@ test('service worker installs the changed app shell and activates the new cache 
   const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const cacheVersion = source.match(/CACHE_NAME\s*=\s*'tsmc-adr-shell-v(\d+)'/)?.[1];
   assert.ok(cacheVersion);
-  assert.ok(html.includes(`./app.jsx?v=${cacheVersion}`));
+  assert.ok(html.includes('type="text/babel" src="./app.jsx"'));
   const handlers = {};
   const added = [];
   const deleted = [];
@@ -496,7 +496,7 @@ test('service worker installs the changed app shell and activates the new cache 
   };
   const caches = {
     open: async name => ({ addAll: async files => { added.push({ name, files }); }, put: async () => {} }),
-    keys: async () => ['tsmc-adr-shell-v2', 'another-cache', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6', 'tsmc-adr-shell-v7'],
+    keys: async () => ['tsmc-adr-shell-v2', 'another-cache', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6', 'tsmc-adr-shell-v7', 'tsmc-adr-shell-v8'],
     delete: async key => { deleted.push(key); return true; },
     match: async () => null
   };
@@ -504,11 +504,11 @@ test('service worker installs the changed app shell and activates the new cache 
   let installPromise;
   handlers.install({ waitUntil: promise => { installPromise = promise; } });
   await installPromise;
-  assert.equal(added[0].name, 'tsmc-adr-shell-v8');
+  assert.equal(added[0].name, `tsmc-adr-shell-v${cacheVersion}`);
   assert.ok(added[0].files.includes('./app.jsx'));
   assert.ok(added[0].files.includes('./market-data.js'));
   let activatePromise;
   handlers.activate({ waitUntil: promise => { activatePromise = promise; } });
   await activatePromise;
-  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6', 'tsmc-adr-shell-v7'].sort());
+  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6', 'tsmc-adr-shell-v7', 'tsmc-adr-shell-v8'].sort());
 });
