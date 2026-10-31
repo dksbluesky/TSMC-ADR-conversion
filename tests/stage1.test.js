@@ -489,8 +489,10 @@ test('service worker installs the changed app shell and activates the new cache 
   const handlers = {};
   const added = [];
   const deleted = [];
+  let skipWaitingCalled = false;
   const self = {
     location: { origin: 'https://example.test' }, registration: { scope: 'https://example.test/' },
+    skipWaiting: () => { skipWaitingCalled = true; return Promise.resolve(); },
     clients: { claim: () => Promise.resolve() },
     addEventListener: (name, handler) => { handlers[name] = handler; }
   };
@@ -507,6 +509,7 @@ test('service worker installs the changed app shell and activates the new cache 
   assert.equal(added[0].name, `tsmc-adr-shell-v${cacheVersion}`);
   assert.ok(added[0].files.includes('./app.jsx'));
   assert.ok(added[0].files.includes('./market-data.js'));
+  assert.equal(skipWaitingCalled, true);
   let activatePromise;
   handlers.activate({ waitUntil: promise => { activatePromise = promise; } });
   await activatePromise;
