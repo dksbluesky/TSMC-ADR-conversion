@@ -11,6 +11,28 @@ const yahoo = (symbol, rows) => ({ chart: { result: [{
   indicators: { quote: [{ close: rows.map(row => row[1]) }] }
 }] } });
 
+function forecastForSessions({ nowMs, targetDate, previousTaiwanDate, adrPreviousDate, adrLatestDate, calendar }) {
+  const taiwanClose = Core.exchangeCloseMs(previousTaiwanDate, 'TW');
+  const adr = {
+    market: 'US', source: 'Yahoo Finance chart API',
+    previous: { price: 300, sessionDate: adrPreviousDate, closeTimestampMs: Core.exchangeCloseMs(adrPreviousDate, 'US') },
+    latest: { price: 315, sessionDate: adrLatestDate, closeTimestampMs: Core.exchangeCloseMs(adrLatestDate, 'US') }
+  };
+  const quotes = {
+    tw2330: { symbol: '2330.TW', latest: { price: 2000, sessionDate: previousTaiwanDate, barTimestampMs: taiwanClose, closeTimestampMs: taiwanClose } },
+    twB: { symbol: '006208.TW', latest: { price: 250, sessionDate: previousTaiwanDate, barTimestampMs: taiwanClose, closeTimestampMs: taiwanClose } },
+    twIndex: { symbol: 'IX0001', latest: { price: 28000, sessionDate: previousTaiwanDate, barTimestampMs: taiwanClose, closeTimestampMs: taiwanClose } }
+  };
+  const exposure = { weight: 0.572285, sessionDate: previousTaiwanDate, retrievedAtMs: nowMs - 1000 };
+  const indexWeight = { weight: 0.416361, sessionDate: previousTaiwanDate, retrievedAtMs: nowMs - 1000, source: 'TAIFEX TAIEX constituents and market-value weights' };
+  const freshness = {
+    tw2330: Core.taiwanQuoteFreshness(quotes.tw2330, previousTaiwanDate, nowMs),
+    twB: Core.taiwanQuoteFreshness(quotes.twB, previousTaiwanDate, nowMs),
+    twIndex: Core.taiwanQuoteFreshness(quotes.twIndex, previousTaiwanDate, nowMs)
+  };
+  return Core.estimateOpeningPrices({ nowMs, targetDate, adr, quotes, freshness, exposure, indexWeight, calendar });
+}
+
 test('DST-aware US close times change from EST to EDT', () => {
   assert.equal(Core.exchangeCloseMs('2026-03-06', 'US'), utc('2026-03-06T21:00:00'));
   assert.equal(Core.exchangeCloseMs('2026-03-09', 'US'), utc('2026-03-09T20:00:00'));
@@ -31,7 +53,8 @@ test('ADR and Taiwan quotes align to completed exchange sessions at Taiwan 08:45
   assert.ok(adr.latest.closeTimestampMs <= cutoff);
   assert.ok(tw.latest.closeTimestampMs <= cutoff);
   assert.equal((adr.latest.price / 5) * 32.5, 1950);
-  assert.equal(Core.baseline({ tw2330: tw.latest.price, twB: 50.05, twC: 20.12 }).tw2330, 1950);
+  assert.equal(Core.baseline({ tw2330: tw.latest.price, twB: 50.05, ix0001: 28000.126 }).tw2330, 1950);
+  assert.equal(Core.baseline({ tw2330: 2000, twB: 250, ix0001: 28000.126 }).ix0001, 28000.13);
 });
 
 test('US holidays and TWSE holiday rows are excluded while an announced make-up day is retained', () => {
@@ -48,6 +71,117 @@ test('US holidays and TWSE holiday rows are excluded while an announced make-up 
   assert.equal(Core.isTaiwanTradingDay('2026-05-01', calendar), false);
   assert.equal(Core.isTaiwanTradingDay('2026-05-09', calendar), true);
   assert.equal(Core.isTaiwanTradingDay('2026-05-04', null), false);
+});
+
+test('next eligible Taiwan session keeps normal weekday behavior and skips open or closed days', () => {
+  const calendar = { closed: new Set(['2026-11-02']), open: new Set() };
+  assert.equal(Core.nextEligibleTaiwanTradingDate(utc('2026-03-09T00:45:00'), calendar), '2026-03-09');
+  assert.equal(Core.nextEligibleTaiwanTradingDate(utc('2026-03-09T01:05:00'), calendar), '2026-03-10');
+  assert.equal(Core.nextEligibleTaiwanTradingDate(utc('2026-10-31T02:00:00'), calendar), '2026-11-03');
+  assert.equal(Core.nextEligibleTaiwanTradingDate(utc('2026-11-01T02:00:00'), calendar), '2026-11-03');
+});
+
+test('Friday 2026-10-30 US close supports a Saturday forecast for Taiwan Monday 2026-11-02', () => {
+  const calendar = { closed: new Set(), open: new Set() };
+  const nowMs = utc('2026-10-31T02:00:00'); // Saturday 10:00 Taiwan, after Friday US close
+  const targetDate = Core.nextEligibleTaiwanTradingDate(nowMs, calendar);
+  assert.equal(targetDate, '2026-11-02');
+  assert.equal(Core.previousTaiwanTradingDate(targetDate, calendar), '2026-10-30');
+  const forecasts = forecastForSessions({
+    nowMs, targetDate, previousTaiwanDate: '2026-10-30',
+    adrPreviousDate: '2026-10-29', adrLatestDate: '2026-10-30', calendar
+  });
+  assert.equal(forecasts.tw2330.status, 'ESTIMATE');
+  assert.equal(forecasts.tw2330.targetDate, '2026-11-02');
+  assert.equal(forecasts.tw2330.previousCloseDate, '2026-10-30');
+  assert.equal(forecasts.twB.status, 'ESTIMATE');
+  assert.equal(forecasts.twB.exposureDate, '2026-10-30');
+  assert.equal(forecasts.ix0001.status, 'ESTIMATE');
+  assert.equal(forecasts.ix0001.targetDate, '2026-11-02');
+  assert.equal(forecasts.ix0001.previousCloseDate, '2026-10-30');
+  assert.equal(forecasts.ix0001.indexWeightDate, '2026-10-30');
+  assert.equal(forecasts.ix0001.estimatedOpen, 28582.91);
+  const sundayNowMs = utc('2026-11-01T02:00:00');
+  assert.equal(Core.nextEligibleTaiwanTradingDate(sundayNowMs, calendar), '2026-11-02');
+  assert.equal(forecastForSessions({
+    nowMs: sundayNowMs, targetDate: '2026-11-02', previousTaiwanDate: '2026-10-30',
+    adrPreviousDate: '2026-10-29', adrLatestDate: '2026-10-30', calendar
+  }).tw2330.status, 'ESTIMATE');
+
+  const staleAdr = forecastForSessions({
+    nowMs, targetDate, previousTaiwanDate: '2026-10-30',
+    adrPreviousDate: '2026-10-28', adrLatestDate: '2026-10-29', calendar
+  });
+  assert.equal(staleAdr.tw2330.status, 'UNAVAILABLE');
+  const mismatchedBaseline = forecastForSessions({
+    nowMs, targetDate, previousTaiwanDate: '2026-10-29',
+    adrPreviousDate: '2026-10-29', adrLatestDate: '2026-10-30', calendar
+  });
+  assert.equal(mismatchedBaseline.tw2330.status, 'UNAVAILABLE');
+});
+
+test('Taiwan holiday moves weekend forecast to the next session while retaining Friday baseline', () => {
+  const calendar = { closed: new Set(['2026-11-02']), open: new Set() };
+  const nowMs = utc('2026-10-31T02:00:00');
+  const targetDate = Core.nextEligibleTaiwanTradingDate(nowMs, calendar);
+  assert.equal(targetDate, '2026-11-03');
+  assert.equal(Core.previousTaiwanTradingDate(targetDate, calendar), '2026-10-30');
+  const forecasts = forecastForSessions({
+    nowMs, targetDate, previousTaiwanDate: '2026-10-30',
+    adrPreviousDate: '2026-10-29', adrLatestDate: '2026-10-30', calendar
+  });
+  assert.equal(forecasts.tw2330.status, 'ESTIMATE');
+  assert.equal(forecasts.tw2330.targetDate, '2026-11-03');
+  assert.equal(forecasts.ix0001.status, 'ESTIMATE');
+});
+
+test('US Thanksgiving stale ADR close is rejected; first later completed ADR session can forecast', () => {
+  const calendar = { closed: new Set(), open: new Set() };
+  assert.equal(Core.isUsTradingDay('2026-11-26'), false);
+  const beforeUsReopens = utc('2026-11-27T00:30:00'); // Friday 08:30 Taiwan
+  assert.equal(Core.nextEligibleTaiwanTradingDate(beforeUsReopens, calendar), '2026-11-27');
+  const stale = forecastForSessions({
+    nowMs: beforeUsReopens, targetDate: '2026-11-27', previousTaiwanDate: '2026-11-26',
+    adrPreviousDate: '2026-11-24', adrLatestDate: '2026-11-25', calendar
+  });
+  assert.equal(stale.tw2330.status, 'UNAVAILABLE');
+
+  const afterFridayUsClose = utc('2026-11-28T01:00:00');
+  const targetDate = Core.nextEligibleTaiwanTradingDate(afterFridayUsClose, calendar);
+  assert.equal(targetDate, '2026-11-30');
+  const fresh = forecastForSessions({
+    nowMs: afterFridayUsClose, targetDate, previousTaiwanDate: '2026-11-27',
+    adrPreviousDate: '2026-11-25', adrLatestDate: '2026-11-27', calendar
+  });
+  assert.equal(fresh.tw2330.status, 'ESTIMATE');
+  assert.equal(fresh.ix0001.status, 'ESTIMATE');
+});
+
+test('saved weekend forecast remains valid and immutable after its target opening', () => {
+  const calendar = { closed: new Set(), open: new Set() };
+  const capturedAtMs = utc('2026-10-31T02:00:00');
+  const estimates = forecastForSessions({
+    nowMs: capturedAtMs, targetDate: '2026-11-02', previousTaiwanDate: '2026-10-30',
+    adrPreviousDate: '2026-10-29', adrLatestDate: '2026-10-30', calendar
+  });
+  const saved = { targetDate: '2026-11-02', capturedAtMs, forecasts: estimates };
+  assert.equal(Core.validateOpeningForecastSnapshot(saved), true);
+
+  const afterOpenMs = utc('2026-11-02T01:05:00');
+  const afterOpenEstimate = forecastForSessions({
+    nowMs: afterOpenMs, targetDate: '2026-11-02', previousTaiwanDate: '2026-10-30',
+    adrPreviousDate: '2026-10-29', adrLatestDate: '2026-10-30', calendar
+  });
+  assert.equal(afterOpenEstimate.tw2330.status, 'UNAVAILABLE');
+  assert.equal(afterOpenEstimate.ix0001.status, 'UNAVAILABLE');
+  assert.equal(Core.validateOpeningForecastSnapshot(saved), true);
+  const laterCandidate = { ...saved, forecasts: {
+    ...saved.forecasts,
+    tw2330: { ...saved.forecasts.tw2330, estimatedOpen: saved.forecasts.tw2330.estimatedOpen + 100 }
+  } };
+  assert.equal(Core.mergeOpeningForecastSnapshot(saved, laterCandidate), saved);
+  assert.equal(saved.forecasts.tw2330.targetDate, '2026-11-02');
+  assert.equal(saved.forecasts.ix0001.targetDate, '2026-11-02');
 });
 
 test('TWSE OpenAPI live response shape and ROC compact dates parse correctly', () => {
@@ -83,7 +217,7 @@ test('partial synchronization and stale or failed FX cannot be reported as compl
   const now = utc('2026-03-09T00:45:00');
   const quote = { latest: { price: 100, sessionDate: '2026-03-06', barTimestampMs: now - 1, closeTimestampMs: now - 1 } };
   const fx = Core.validateFxResponse({ rates: { TWD: 32.5 }, time_last_update_unix: (now - 1000) / 1000 }, now);
-  const full = { adr: quote, tw2330: quote, twB: quote, twC: quote, fx };
+  const full = { adr: quote, tw2330: quote, twB: quote, twIndex: quote, fx };
   assert.equal(Core.validateBundle(full, now), true);
   assert.throws(() => Core.validateBundle({ ...full, fx: null }, now), /Incomplete synchronization/);
   assert.throws(() => Core.validateFxResponse({ rates: { TWD: 32.5 } }, now), /timestamp/);
@@ -97,8 +231,8 @@ test('Taiwan quotes from different sessions are validated per symbol', () => {
   } });
   const fx = { price: 32.5, timestampMs: now - 1000 };
   const bundle = { adr: quote('2026-03-06'), tw2330: quote('2026-03-06'),
-    twB: quote('2026-03-05'), twC: quote('2026-03-05'), fx };
-  assert.equal(Core.taiwanSessionsAligned([bundle.tw2330, bundle.twB, bundle.twC]), false);
+    twB: quote('2026-03-05'), twIndex: quote('2026-03-05'), fx };
+  assert.equal(Core.taiwanSessionsAligned([bundle.tw2330, bundle.twB, bundle.twIndex]), false);
   assert.equal(Core.validateBundle(bundle, now), true);
   assert.equal(Core.taiwanQuoteFreshness(bundle.tw2330, '2026-03-06', now), 'FRESH');
   assert.equal(Core.taiwanQuoteFreshness(bundle.twB, '2026-03-06', now), 'STALE');
@@ -115,16 +249,16 @@ test('mixed fresh and stale Taiwan closes retain only the independently verified
   } });
   const tw2330 = quote('2026-10-29', 2415);
   const twB = quote('2026-10-28', 249.05);
-  const twC = quote('2026-10-28', 35.65);
+  const twIndex = quote('2026-10-29', 28000.25);
 
   assert.equal(expected, '2026-10-29');
   assert.equal(Core.taiwanQuoteFreshness(tw2330, expected, now), 'FRESH');
   assert.equal(Core.taiwanQuoteFreshness(twB, expected, now), 'STALE');
-  assert.equal(Core.taiwanQuoteFreshness(twC, expected, now), 'STALE');
+  assert.equal(Core.taiwanQuoteFreshness(twIndex, expected, now), 'FRESH');
   const baseline = Core.verifiedTaiwanBaseline({
-    tw2330: tw2330.latest.price, twB: twB.latest.price, twC: twC.latest.price
-  }, { tw2330: 'FRESH', twB: 'STALE', twC: 'STALE' });
-  assert.deepEqual(baseline, { tw2330: 2415, twB: null, twC: null });
+    tw2330: tw2330.latest.price, twB: twB.latest.price, ix0001: twIndex.latest.price
+  }, { tw2330: 'FRESH', twB: 'STALE', ix0001: 'FRESH' });
+  assert.deepEqual(baseline, { tw2330: 2415, twB: null, ix0001: 28000.25 });
   assert.equal(Core.taiwanQuoteFreshness(null, expected, now), 'UNAVAILABLE');
 });
 
@@ -159,28 +293,59 @@ test('TWSE ETF fallback rejects mismatched symbol, month, date, invalid price, a
   const date = '2026-10-29';
   const retrievedAt = Core.exchangeCloseMs(date, 'TW') + 60_000;
   const body = {
-    stat: 'OK', date: '20261001', title: '115年10月 00878 國泰永續高股息',
-    fields: ['日期', '收盤價'], data: [['115/10/29', '35.30']]
+    stat: 'OK', date: '20261001', title: '115年10月 006208 富邦台50',
+    fields: ['日期', '收盤價'], data: [['115/10/29', '245.75']]
   };
-  assert.throws(() => Core.parseTwseDailyQuote(body, '006208', date, retrievedAt), /does not match/);
-  assert.throws(() => Core.parseTwseDailyQuote({ ...body, date: '20260901' }, '00878', date, retrievedAt), /does not match/);
-  assert.throws(() => Core.parseTwseDailyQuote({ ...body, data: [['115/10/28', '35.30']] }, '00878', date, retrievedAt), /no unique completed row/);
-  assert.throws(() => Core.parseTwseDailyQuote({ ...body, data: [['115/10/29', '—']] }, '00878', date, retrievedAt), /invalid or not yet complete/);
-  assert.throws(() => Core.parseTwseDailyQuote(body, '00878', date, Core.exchangeCloseMs(date, 'TW') - 1), /invalid or not yet complete/);
+  assert.throws(() => Core.parseTwseDailyQuote({ ...body, title: '115年10月 2330 台積電' }, '006208', date, retrievedAt), /does not match/);
+  assert.throws(() => Core.parseTwseDailyQuote({ ...body, date: '20260901' }, '006208', date, retrievedAt), /does not match/);
+  assert.throws(() => Core.parseTwseDailyQuote({ ...body, data: [['115/10/28', '245.75']] }, '006208', date, retrievedAt), /no unique completed row/);
+  assert.throws(() => Core.parseTwseDailyQuote({ ...body, data: [['115/10/29', '—']] }, '006208', date, retrievedAt), /invalid or not yet complete/);
+  assert.throws(() => Core.parseTwseDailyQuote(body, '006208', date, Core.exchangeCloseMs(date, 'TW') - 1), /invalid or not yet complete/);
+});
+
+test('Fugle returns only the exact dated IX0001 daily close', () => {
+  const retrievedAt = utc('2026-10-31T02:00:00');
+  const body = { symbol: 'IX0001', timeframe: 'D', data: [
+    { date: '2026-10-29', close: 27900 }, { date: '2026-10-30', close: 28012.34 }
+  ] };
+  const quote = Core.parseFugleIndexClose(body, '2026-10-30', retrievedAt);
+  assert.equal(quote.latest.price, 28012.34);
+  assert.equal(quote.latest.sessionDate, '2026-10-30');
+  assert.equal(quote.previous.price, 27900);
+  assert.equal(quote.source, 'Fugle historical candles');
+  assert.throws(() => Core.parseFugleIndexClose({ ...body, symbol: '2330' }, '2026-10-30', retrievedAt), /not daily IX0001/);
+  assert.throws(() => Core.parseFugleIndexClose({ ...body, timeframe: '1' }, '2026-10-30', retrievedAt), /not daily IX0001/);
+  assert.throws(() => Core.parseFugleIndexClose({ ...body, data: body.data.slice(0, 1) }, '2026-10-30', retrievedAt), /no unique IX0001 close/);
+  assert.throws(() => Core.parseFugleIndexClose({ ...body, data: [...body.data, body.data[1]] }, '2026-10-30', retrievedAt), /no unique IX0001 close/);
+  assert.throws(() => Core.parseFugleIndexClose({ ...body, data: [body.data[0], { date: '2026-10-30', close: 0 }] }, '2026-10-30', retrievedAt), /no unique IX0001 close/);
+});
+
+test('TAIFEX TSMC weight must be unique, dated, and no more than 45 days old', () => {
+  const retrievedAt = utc('2026-10-31T02:00:00');
+  const html = `<div>資料日期：2026/10/30</div><table><tr><th>股票代號</th><th>股票名稱</th><th>比重</th></tr><tr><td>2330</td><td>台積電</td><td>41.6361%</td></tr></table>`;
+  const weight = Core.parseTaiexTsmcWeight(html, '2026-10-30', retrievedAt);
+  assert.ok(Math.abs(weight.weight - 0.416361) < 1e-12);
+  assert.equal(weight.sessionDate, '2026-10-30');
+  assert.equal(weight.source, 'TAIFEX TAIEX constituents and market-value weights');
+  assert.throws(() => Core.parseTaiexTsmcWeight(html.replace('41.6361%', '—'), '2026-10-30', retrievedAt), /no unique valid/);
+  assert.throws(() => Core.parseTaiexTsmcWeight(html + html, '2026-10-30', retrievedAt), /no unique valid/);
+  assert.throws(() => Core.parseTaiexTsmcWeight(html.replace('2026/10/30', '2026/09/01'), '2026-10-30', retrievedAt), /stale/);
+  assert.throws(() => Core.parseTaiexTsmcWeight(html.replace('2026/10/30', '2026/11/01'), '2026-10-30', retrievedAt), /future-dated/);
+  assert.throws(() => Core.parseTaiexTsmcWeight(html.replace('2330', '2317'), '2026-10-30', retrievedAt), /no unique valid/);
 });
 
 test('manual fallback prices produce independent previous-close baselines', () => {
   assert.deepEqual(Core.resolvePrice('300', 100, 299, 90), { price: 300, timestampMs: 100, source: '手動輸入' });
   assert.deepEqual(Core.resolvePrice('', null, 299, 90), { price: 299, timestampMs: 90, source: '自動來源' });
   assert.equal(Core.resolvePrice('-1', 100, 299, 90), null);
-  const fromManual = Core.baseline({ tw2330: '1900', twB: '52.15', twC: '20.34' });
-  assert.deepEqual(fromManual, { tw2330: 1900, twB: 52.15, twC: 20.34 });
-  const changed00878 = Core.baseline({ tw2330: '1900', twB: '52.15', twC: '21.08' });
-  assert.equal(changed00878.twB, fromManual.twB);
-  assert.equal(changed00878.tw2330, fromManual.tw2330);
-  assert.equal(changed00878.twC, 21.08);
-  assert.deepEqual(Core.baseline({ tw2330: 1900, twB: 52.15, twC: 0 }), { tw2330: 1900, twB: 52.15, twC: null });
-  assert.equal(Core.baseline({ tw2330: 0, twB: null, twC: 0 }), null);
+  const fromManual = Core.baseline({ tw2330: '1900', twB: '52.15', ix0001: '20340.25' });
+  assert.deepEqual(fromManual, { tw2330: 1900, twB: 52.15, ix0001: 20340.25 });
+  const changedIndex = Core.baseline({ tw2330: '1900', twB: '52.15', ix0001: '21080.08' });
+  assert.equal(changedIndex.twB, fromManual.twB);
+  assert.equal(changedIndex.tw2330, fromManual.tw2330);
+  assert.equal(changedIndex.ix0001, 21080.08);
+  assert.deepEqual(Core.baseline({ tw2330: 1900, twB: 52.15, ix0001: 0 }), { tw2330: 1900, twB: 52.15, ix0001: null });
+  assert.equal(Core.baseline({ tw2330: 0, twB: null, ix0001: 0 }), null);
 });
 
 test('price inputs format floating-point source values without rounding calculation inputs', () => {
@@ -239,17 +404,21 @@ test('opening estimates use ADR return and date-matched 006208 exposure, then ro
   };
   const quotes = {
     tw2330: { symbol: '2330.TW', latest: { price: 2000, sessionDate: '2026-03-06', closeTimestampMs: twClose } },
-    twB: { symbol: '006208.TW', latest: { price: 250, sessionDate: '2026-03-06', closeTimestampMs: twClose } }
+    twB: { symbol: '006208.TW', latest: { price: 250, sessionDate: '2026-03-06', closeTimestampMs: twClose } },
+    twIndex: { symbol: 'IX0001', latest: { price: 28000, sessionDate: '2026-03-06', closeTimestampMs: twClose } }
   };
   const exposure = { weight: 0.572285, sessionDate: '2026-03-06', retrievedAtMs: now - 1000, source: 'Fubon ETF official 006208 assets page' };
-  const forecasts = Core.estimateOpeningPrices({ adr, quotes, freshness: { tw2330: 'FRESH', twB: 'FRESH' }, exposure, nowMs: now, calendar });
+  const indexWeight = { weight: 0.4, sessionDate: '2026-03-06', retrievedAtMs: now - 1000, source: 'TAIFEX TAIEX constituents and market-value weights' };
+  const forecasts = Core.estimateOpeningPrices({ adr, quotes, freshness: { tw2330: 'FRESH', twB: 'FRESH', twIndex: 'FRESH' }, exposure, indexWeight, nowMs: now, calendar });
   assert.equal(forecasts.tw2330.estimatedOpen, 2100);
   assert.ok(Math.abs(forecasts.tw2330.changePercent - 5) < 1e-10);
   assert.equal(forecasts.tw2330.previousClose, 2000);
   assert.equal(forecasts.twB.estimatedOpen, 257.15);
   assert.ok(Math.abs(forecasts.twB.changePercent - 2.861425) < 1e-10);
   assert.equal(forecasts.twB.exposureWeight, 0.572285);
-  assert.equal(forecasts.twC.status, 'NO_ESTIMATE');
+  assert.equal(forecasts.ix0001.estimatedOpen, 28560);
+  assert.equal(forecasts.ix0001.indexWeight, 0.4);
+  assert.equal(forecasts.ix0001.indexWeightDate, '2026-03-06');
   assert.equal(forecasts.tw2330.targetDate, '2026-03-09');
   assert.equal(Core.previousTaiwanTradingDate('2026-03-09', calendar), '2026-03-06');
   const snapshot = { targetDate: '2026-03-09', capturedAtMs: now, forecasts };
@@ -257,10 +426,11 @@ test('opening estimates use ADR return and date-matched 006208 exposure, then ro
   assert.equal(Core.validateOpeningForecastSnapshot({ ...snapshot, capturedAtMs: utc('2026-03-09T01:00:00') }), false);
   assert.equal(Core.mergeOpeningForecastSnapshot(null, snapshot), snapshot);
   assert.equal(Core.mergeOpeningForecastSnapshot(snapshot, snapshot), snapshot);
-  const partial = { ...snapshot, forecasts: { ...forecasts, twB: { status: 'UNAVAILABLE' } } };
+  const partial = { ...snapshot, forecasts: { ...forecasts, twB: { status: 'UNAVAILABLE' }, ix0001: { status: 'UNAVAILABLE' } } };
   const merged = Core.mergeOpeningForecastSnapshot(partial, snapshot);
   assert.equal(merged.forecasts.tw2330, partial.forecasts.tw2330);
   assert.equal(merged.forecasts.twB.status, 'ESTIMATE');
+  assert.equal(merged.forecasts.ix0001.status, 'ESTIMATE');
   const revised2330 = { ...snapshot, forecasts: { ...forecasts, tw2330: { ...forecasts.tw2330, estimatedOpen: 9999 } } };
   assert.equal(Core.mergeOpeningForecastSnapshot(snapshot, revised2330), snapshot);
 });
@@ -275,10 +445,12 @@ test('opening forecasts reject missing, stale, mismatched, and out-of-window inp
   };
   const quotes = {
     tw2330: { symbol: '2330.TW', latest: { price: 2000, sessionDate: '2026-03-06', closeTimestampMs: twClose } },
-    twB: { symbol: '006208.TW', latest: { price: 250, sessionDate: '2026-03-06', closeTimestampMs: twClose } }
+    twB: { symbol: '006208.TW', latest: { price: 250, sessionDate: '2026-03-06', closeTimestampMs: twClose } },
+    twIndex: { symbol: 'IX0001', latest: { price: 28000, sessionDate: '2026-03-06', closeTimestampMs: twClose } }
   };
   const exposure = { weight: 0.57, sessionDate: '2026-03-06', retrievedAtMs: now - 1000 };
-  const base = { quotes, freshness: { tw2330: 'FRESH', twB: 'FRESH' }, exposure, nowMs: now, calendar };
+  const indexWeight = { weight: 0.416361, sessionDate: '2026-03-06', retrievedAtMs: now - 1000 };
+  const base = { quotes, freshness: { tw2330: 'FRESH', twB: 'FRESH', twIndex: 'FRESH' }, exposure, indexWeight, nowMs: now, calendar };
   assert.equal(Core.estimateOpeningPrices({ ...base, adr: null }).tw2330.status, 'UNAVAILABLE');
   assert.equal(Core.estimateOpeningPrices({ ...base, adr, freshness: { tw2330: 'STALE', twB: 'STALE' } }).tw2330.status, 'UNAVAILABLE');
   const mismatched = { ...quotes, twB: { ...quotes.twB, latest: { ...quotes.twB.latest, sessionDate: '2026-03-05' } } };
@@ -286,6 +458,11 @@ test('opening forecasts reject missing, stale, mismatched, and out-of-window inp
   const oldExposure = { ...exposure, sessionDate: '2026-03-05' };
   assert.equal(Core.estimateOpeningPrices({ ...base, adr, exposure: oldExposure }).twB.status, 'UNAVAILABLE');
   assert.equal(Core.estimateOpeningPrices({ ...base, adr, exposure: null }).twB.status, 'UNAVAILABLE');
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr, indexWeight: null }).ix0001.status, 'UNAVAILABLE');
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr, freshness: { tw2330: 'FRESH', twB: 'FRESH', twIndex: 'STALE' } }).ix0001.status, 'UNAVAILABLE');
+  const mismatchedIndex = { ...quotes, twIndex: { ...quotes.twIndex, latest: { ...quotes.twIndex.latest, sessionDate: '2026-03-05' } } };
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr, quotes: mismatchedIndex }).ix0001.status, 'UNAVAILABLE');
+  assert.equal(Core.estimateOpeningPrices({ ...base, adr, indexWeight: { ...indexWeight, sessionDate: '2026-01-01' } }).ix0001.status, 'UNAVAILABLE');
   const oldAdr = { ...adr,
     previous: { price: 295, sessionDate: '2026-03-04', closeTimestampMs: Core.exchangeCloseMs('2026-03-04', 'US') },
     latest: { ...adr.latest, price: 300, sessionDate: '2026-03-05', closeTimestampMs: Core.exchangeCloseMs('2026-03-05', 'US') }
@@ -315,7 +492,7 @@ test('service worker installs the changed app shell and activates the new cache 
   };
   const caches = {
     open: async name => ({ addAll: async files => { added.push({ name, files }); }, put: async () => {} }),
-    keys: async () => ['tsmc-adr-shell-v2', 'another-cache', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6'],
+    keys: async () => ['tsmc-adr-shell-v2', 'another-cache', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6', 'tsmc-adr-shell-v7'],
     delete: async key => { deleted.push(key); return true; },
     match: async () => null
   };
@@ -323,11 +500,11 @@ test('service worker installs the changed app shell and activates the new cache 
   let installPromise;
   handlers.install({ waitUntil: promise => { installPromise = promise; } });
   await installPromise;
-  assert.equal(added[0].name, 'tsmc-adr-shell-v7');
+  assert.equal(added[0].name, 'tsmc-adr-shell-v8');
   assert.ok(added[0].files.includes('./app.jsx'));
   assert.ok(added[0].files.includes('./market-data.js'));
   let activatePromise;
   handlers.activate({ waitUntil: promise => { activatePromise = promise; } });
   await activatePromise;
-  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6'].sort());
+  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6', 'tsmc-adr-shell-v7'].sort());
 });

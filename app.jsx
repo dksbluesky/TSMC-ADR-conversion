@@ -9,9 +9,9 @@ function readSavedOpeningForecast() {
   } catch { return null; }
 }
 
-const INITIAL_MANUAL = { adr: '', fx: '', tw2330: '', twB: '', twC: '' };
+const INITIAL_MANUAL = { adr: '', fx: '', tw2330: '', twB: '', twIndex: '' };
 function App() {
-  const [tickers, setTickers] = useState({ b: '006208', c: '00878' });
+  const [tickers, setTickers] = useState({ b: '006208' });
   const [bundle, setBundle] = useState({});
   const [manual, setManual] = useState(INITIAL_MANUAL);
   const [manualDisplay, setManualDisplay] = useState({});
@@ -92,6 +92,24 @@ function App() {
       (html, retrievedAtMs) => Core.parseFubonTaiwan50Exposure(html, retrievedAtMs));
   };
 
+  const fetchFugleIndexClose = async expectedDate => {
+    const apiKey = localStorage.getItem('fugle_api_key') || '';
+    if (!apiKey) throw new Error('找不到 Fugle API Key；請先在 TAR-OBI 同一 GitHub Pages 網域設定。');
+    const fromDate = new Date(`${expectedDate}T12:00:00+08:00`);
+    fromDate.setUTCDate(fromDate.getUTCDate() - 45);
+    const params = new URLSearchParams({ from: fromDate.toISOString().slice(0, 10), to: expectedDate, timeframe: 'D', adjusted: 'false', fields: 'close' });
+    const response = await fetch(`https://api.fugle.tw/marketdata/v1.0/stock/historical/candles/IX0001?${params}`, {
+      headers: { 'X-API-KEY': apiKey }, cache: 'no-store', credentials: 'omit'
+    });
+    if (!response.ok) throw new Error(`Fugle IX0001 HTTP ${response.status}`);
+    return Core.parseFugleIndexClose(await response.json(), expectedDate, Date.now());
+  };
+
+  const fetchTaiexTsmcWeight = referenceDate => fetchProxiedText(
+    'https://www.taifex.com.tw/cht/9/futuresQADetail',
+    (html, retrievedAtMs) => Core.parseTaiexTsmcWeight(html, referenceDate, retrievedAtMs)
+  );
+
   const fetchTwseDailyQuote = async (symbol, targetDate) => {
     const month = targetDate.slice(0, 7).replace('-', '');
     const rawUrl = `https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date=${month}01&stockNo=${symbol}&response=json`;
@@ -101,18 +119,20 @@ function App() {
 
   const savePremarketForecast = (quotes, sessionCalendar) => {
     const capturedAtMs = Date.now();
-    const targetDate = Core.taipeiDateKey(capturedAtMs);
+    const targetDate = Core.nextEligibleTaiwanTradingDate(capturedAtMs, sessionCalendar);
+    if (!targetDate) return;
     const targetOpenMs = Core.zonedTimeToUtc(targetDate, 9, 0, Core.TIME_ZONES.TW);
-    if (!sessionCalendar || !Core.isTaiwanTradingDay(targetDate, sessionCalendar) || capturedAtMs >= targetOpenMs) return;
+    if (capturedAtMs >= targetOpenMs) return;
     const previousDate = Core.previousTaiwanTradingDate(targetDate, sessionCalendar);
     const freshness = {
       tw2330: Core.taiwanQuoteFreshness(quotes.tw2330, previousDate, capturedAtMs),
-      twB: Core.taiwanQuoteFreshness(quotes.twB, previousDate, capturedAtMs)
+      twB: Core.taiwanQuoteFreshness(quotes.twB, previousDate, capturedAtMs),
+      twIndex: Core.taiwanQuoteFreshness(quotes.twIndex, previousDate, capturedAtMs)
     };
     const estimates = Core.estimateOpeningPrices({
       nowMs: capturedAtMs, targetDate, adr: quotes.adr,
-      quotes: { tw2330: quotes.tw2330, twB: quotes.twB }, freshness,
-      exposure: quotes.exposure, calendar: sessionCalendar
+      quotes: { tw2330: quotes.tw2330, twB: quotes.twB, twIndex: quotes.twIndex }, freshness,
+      exposure: quotes.exposure, indexWeight: quotes.indexWeight, calendar: sessionCalendar
     });
     const record = { targetDate, capturedAtMs, forecasts: estimates };
     if (!Core.validateOpeningForecastSnapshot(record)) return;
@@ -130,10 +150,10 @@ function App() {
   const runAutoSync = async () => {
     setLoading(true);
     setErrors([]);
-    const names = ['adr', 'tw2330', 'twB', 'twC', 'fx', 'exposure'];
+    const names = ['adr', 'tw2330', 'twB', 'fx', 'exposure'];
     const requests = [
       fetchYahoo('TSM', 'US'), fetchYahoo('2330.TW', 'TW'),
-      fetchYahoo(`${tickers.b}.TW`, 'TW'), fetchYahoo(`${tickers.c}.TW`, 'TW'),
+      fetchYahoo(`${tickers.b}.TW`, 'TW'),
       fetch('https://open.er-api.com/v6/latest/USD').then(response => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json();
@@ -155,7 +175,7 @@ function App() {
       const syncTime = Date.now();
       const expectedDate = Core.latestCompletedTaiwanSessionDate(syncTime, calendarResult);
       if (expectedDate) {
-        for (const [key, symbol] of [['twB', tickers.b], ['twC', tickers.c]]) {
+        for (const [key, symbol] of [['twB', tickers.b]]) {
           if (Core.taiwanQuoteFreshness(next[key], expectedDate, syncTime) === 'FRESH') continue;
           try {
             next[key] = await fetchTwseDailyQuote(symbol, expectedDate);
@@ -163,6 +183,13 @@ function App() {
             failures.push(`${symbol} TWSE 備援未驗證：${error?.message || '讀取失敗'}`);
           }
         }
+        const [indexResult, weightResult] = await Promise.allSettled([
+          fetchFugleIndexClose(expectedDate), fetchTaiexTsmcWeight(expectedDate)
+        ]);
+        if (indexResult.status === 'fulfilled') next.twIndex = indexResult.value;
+        else failures.push(`IX0001 Fugle：${indexResult.reason?.message || '來源讀取失敗'}`);
+        if (weightResult.status === 'fulfilled') next.indexWeight = weightResult.value;
+        else failures.push(`TAIFEX 台積電權重：${weightResult.reason?.message || '來源讀取失敗'}`);
       }
     } else {
       setCalendar(null);
@@ -180,7 +207,7 @@ function App() {
     setLoading(false);
   };
 
-  useEffect(() => { runAutoSync(); }, [tickers.b, tickers.c]);
+  useEffect(() => { runAutoSync(); }, [tickers.b]);
   useEffect(() => {
     const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
@@ -195,20 +222,23 @@ function App() {
     fx: resolveInput('fx', bundle.fx?.price, bundle.fx?.timestampMs),
     tw2330: resolveInput('tw2330', bundle.tw2330?.latest?.price, bundle.tw2330?.latest?.barTimestampMs),
     twB: resolveInput('twB', bundle.twB?.latest?.price, bundle.twB?.latest?.barTimestampMs),
-    twC: resolveInput('twC', bundle.twC?.latest?.price, bundle.twC?.latest?.barTimestampMs)
+    twIndex: resolveInput('twIndex', bundle.twIndex?.latest?.price, bundle.twIndex?.latest?.barTimestampMs)
   };
   const previousAdr = bundle.adr?.previous?.price;
   const expectedTaiwanCloseDate = Core.latestCompletedTaiwanSessionDate(clock, calendar);
-  const taiwanFreshness = Object.fromEntries(['tw2330', 'twB', 'twC'].map(key => [
+  const taiwanFreshness = Object.fromEntries(['tw2330', 'twB', 'twIndex'].map(key => [
     key,
     inputs[key]?.source === '手動輸入' ? 'MANUAL' : Core.taiwanQuoteFreshness(bundle[key], expectedTaiwanCloseDate, clock)
   ]));
   const currentTaiwanDate = Core.taipeiDateKey(clock);
-  const forecasts = savedForecast?.targetDate === currentTaiwanDate ? savedForecast.forecasts : {
+  const forecastTargetDate = savedForecast?.targetDate || Core.nextEligibleTaiwanTradingDate(clock, calendar) || currentTaiwanDate;
+  const forecasts = {
     tw2330: { status: 'UNAVAILABLE', reason: '尚未保存符合目標交易日與時段條件的開盤估計。' },
     twB: { status: 'UNAVAILABLE', reason: '尚未保存符合目標交易日與時段條件的開盤估計。' },
-    twC: { status: 'NO_ESTIMATE', reason: 'No validated independent overnight signal is available for 00878.' }
+    ix0001: { status: 'UNAVAILABLE', reason: '尚未保存符合目標交易日與時段條件的開盤估計。' },
+    ...(savedForecast?.forecasts || {})
   };
+  const forecastAvailable = ['tw2330', 'twB', 'ix0001'].some(key => forecasts[key]?.status === 'ESTIMATE');
   const adrOvernightMove = Number.isFinite(previousAdr) && previousAdr > 0 && inputs.adr?.price > 0
     ? (inputs.adr.price / previousAdr - 1) * 100 : null;
   const completeSync = (() => {
@@ -218,7 +248,9 @@ function App() {
       Number.isFinite(bundle.exposure?.weight) && bundle.exposure.weight > 0 && bundle.exposure.weight <= 1 &&
       bundle.exposure.sessionDate === expectedTaiwanCloseDate
     );
-    return validEtfWeight && ['tw2330', 'twB', 'twC'].every(key => taiwanFreshness[key] === 'FRESH');
+    const validIndexWeight = Number.isFinite(bundle.indexWeight?.weight) && bundle.indexWeight.weight > 0 &&
+      bundle.indexWeight.weight <= 1 && bundle.indexWeight.sessionDate <= expectedTaiwanCloseDate;
+    return validEtfWeight && validIndexWeight && ['tw2330', 'twB', 'twIndex'].every(key => taiwanFreshness[key] === 'FRESH');
   })();
   const freshnessText = key => {
     const latest = bundle[key]?.latest?.sessionDate || '—';
@@ -301,7 +333,7 @@ function App() {
       clock >= Core.zonedTimeToUtc(forecast.targetDate, 9, 0, Core.TIME_ZONES.TW));
     const changeClass = forecast?.changePercent > 0 ? 'text-up' : forecast?.changePercent < 0 ? 'text-down' : 'text-slate-700';
     const previousClose = priorCloseForCard(key, forecast);
-    const unavailableText = key === 'twC' ? '無預估模型' : '尚無有效估計';
+    const unavailableText = '尚無有效估計';
     return <article key={symbol} className="forecast-card glass-panel p-4 rounded-xl flex flex-col">
       <div className="flex justify-between items-start gap-2 min-w-0">
         <h3 className="font-bold text-slate-900 min-w-0">{symbol} <span className="font-medium">{name}</span></h3>
@@ -327,6 +359,7 @@ function App() {
   const forecastDetails = (symbol, name, forecast, key) => {
     const isEstimate = forecast?.status === 'ESTIMATE';
     const isEtf = key === 'twB';
+    const isIndex = key === 'ix0001';
     const adrText = isEstimate
       ? `TSM ADR：${fmt(forecast.adrPrevious.price)}（${forecast.adrPrevious.sessionDate}，${exactMarketCloseTime(forecast.adrPrevious.closeTimestampMs, 'US')}）→ ${fmt(forecast.adrLatest.price)}（${forecast.adrLatest.sessionDate}，${exactMarketCloseTime(forecast.adrLatest.closeTimestampMs, 'US')}）`
       : '';
@@ -335,22 +368,27 @@ function App() {
       {isEstimate ? <>
         <p>估計建立於：{exactMarketCloseTime(forecast.capturedAtMs, 'TW')}；目標交易日：{forecast.targetDate}。前收 {fmt(forecast.previousClose)}，日期 {forecast.previousCloseDate}，時間 {exactMarketCloseTime(forecast.previousCloseTimestampMs, 'TW')}。</p>
         <p>公式：{isEtf
-          ? `前收 × [1 + ADR 報酬率 × TSMC 權重（${(forecast.exposureWeight * 100).toFixed(2)}%）]`
-          : '前收 × (1 + TSM ADR 隔夜報酬率)'}</p>
+          ? `前收 × [1 + ADR 報酬率 × 006208 持股權重（${(forecast.exposureWeight * 100).toFixed(2)}%）]`
+          : isIndex
+            ? `TAIEX 前收 × [1 + ADR 報酬率 × TSMC 指數權重（${(forecast.indexWeight * 100).toFixed(4)}%）]`
+            : '前收 × (1 + TSM ADR 隔夜報酬率)'}</p>
         <p>ADR 隔夜報酬：{pct(forecast.adrReturn * 100)}。{adrText}</p>
         {isEtf && <p>權重來源：富邦投信 006208 持股；資料日 {forecast.exposureDate}；擷取 {exactMarketCloseTime(forecast.exposureRetrievedAtMs, 'TW')}。來源：<a className="source-link" href="https://www.fubon.com/asset-management/fund/info/006208" target="_blank" rel="noreferrer">富邦投信 006208</a>。</p>}
+        {isIndex && <p>權重來源：TAIFEX TAIEX 成分股市值比重；資料日 {forecast.indexWeightDate}；擷取 {exactMarketCloseTime(forecast.indexWeightRetrievedAtMs, 'TW')}。來源：<a className="source-link" href="https://www.taifex.com.tw/cht/9/futuresQADetail" target="_blank" rel="noreferrer">TAIFEX</a>。</p>}
         <p>假設：{isEtf
           ? 'TSMC 隔夜報酬僅按基金當日 TSMC 持股權重傳導；其他成分股、匯率、追蹤誤差及折溢價變動視為 0。'
-          : '假設 TSMC 普通股與 ADR 隔夜百分比報酬 1:1；未以 ADR 折算價推估。'} USD/TWD 變動未納入；Yahoo 日線時間戳是 K 棒時間，收盤時點依交易時段推算，非來源發布時間。尚未經回測驗證。</p>
-      </> : <p>{forecast?.reason || (key === 'twC' ? '此標的目前沒有可用的獨立隔夜市場訊號。' : '尚未保存符合目標交易日與時段條件的開盤估計。')}</p>}
-      <p>市場資料來源：<a className="source-link" href="https://query1.finance.yahoo.com/v8/finance/chart/TSM" target="_blank" rel="noreferrer">Yahoo Finance Chart API</a>；台股收盤與交易日資料：<a className="source-link" href="https://www.twse.com.tw/" target="_blank" rel="noreferrer">TWSE</a>。</p>
+          : isIndex
+            ? '假設 TSMC ADR 隔夜報酬依該指數市值權重傳導，其餘成分股及匯率變動視為 0；此權重為月更參考值。'
+            : '假設 TSMC 普通股與 ADR 隔夜百分比報酬 1:1；未以 ADR 折算價推估。'} USD/TWD 變動未納入；Yahoo 日線時間戳是 K 棒時間，收盤時點依交易時段推算，非來源發布時間。尚未經回測驗證。</p>
+      </> : <p>{forecast?.reason || '尚未保存符合目標交易日與時段條件的開盤估計。'}</p>}
+      <p>市場資料來源：<a className="source-link" href="https://query1.finance.yahoo.com/v8/finance/chart/TSM" target="_blank" rel="noreferrer">Yahoo Finance Chart API</a>；台股收盤：<a className="source-link" href="https://www.twse.com.tw/" target="_blank" rel="noreferrer">TWSE</a>；TAIEX 指數收盤：<a className="source-link" href="https://developer.fugle.tw/docs/data/http-api/historical/candles/" target="_blank" rel="noreferrer">Fugle</a>；TSMC 權重：<a className="source-link" href="https://www.taifex.com.tw/cht/9/futuresQADetail" target="_blank" rel="noreferrer">TAIFEX</a>。</p>
     </article>;
   };
   const quoteSource = key => inputs[key]?.source === '手動輸入'
     ? '手動備援'
     : bundle[key]?.source || '來源尚未驗證';
   const quoteRetrievedAt = key => bundle[key]?.retrievedAtMs
-    ? `；TWSE 擷取於 ${new Date(bundle[key].retrievedAtMs).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}`
+    ? `；來源擷取於 ${new Date(bundle[key].retrievedAtMs).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}`
     : '';
   const field = (key, label, step = '0.01') => (
     <label className="flex items-center justify-between gap-3 text-sm text-slate-600">
@@ -367,12 +405,12 @@ function App() {
       <header className="app-header flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
         <div className="min-w-0">
           <h1 className="text-lg font-bold text-slate-900">台股開盤預估</h1>
-          <p className="text-xs text-slate-500 mt-1">Target session · {currentTaiwanDate.replace(/-/g, '/')}</p>
+          <p className="text-xs text-slate-500 mt-1">Target session · {forecastTargetDate.replace(/-/g, '/')}</p>
         </div>
         <div className="header-controls flex items-center gap-2">
-          <span className="compact-status" title={loading ? '正在讀取資料來源' : completeSync ? '行情資料已通過驗證' : '行情資料尚未完整通過驗證'}>
-            <span className={`status-dot ${loading ? 'status-yellow' : completeSync ? 'status-green' : 'status-red'}`}></span>
-            {loading ? '同步中' : completeSync ? '資料完整' : '部分資料'}
+          <span className="compact-status" title={loading ? '正在讀取資料來源' : forecastAvailable ? '此目標交易日已有保存的估計' : completeSync ? '行情來源完整，但目前沒有可用估計' : '行情或模型輸入尚未完整驗證'}>
+            <span className={`status-dot ${loading ? 'status-yellow' : forecastAvailable ? 'status-green' : completeSync ? 'status-yellow' : 'status-red'}`}></span>
+            {loading ? '同步中' : forecastAvailable ? '估計已保存' : completeSync ? '行情完整・無估計' : '估計不可用'}
           </span>
           <span className="provisional-label">暫定模型</span>
           <button onClick={runAutoSync} disabled={loading} className="btn-live text-white px-3 py-2 rounded-lg text-sm font-semibold min-w-[88px]">
@@ -385,7 +423,7 @@ function App() {
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
           {estimateCard('2330', '台積電', forecasts.tw2330, 'tw2330')}
           {estimateCard(tickers.b, '富邦台50', forecasts.twB, 'twB')}
-          {estimateCard(tickers.c, '國泰永續高股息', forecasts.twC, 'twC')}
+          {estimateCard('IX0001', '台灣加權股價指數', forecasts.ix0001, 'ix0001')}
         </div>
       </section>
 
@@ -401,7 +439,7 @@ function App() {
         <div className="data-summary glass-panel rounded-xl p-3 md:p-4">
           <h2 className="text-xs font-semibold text-slate-500 mb-2">資料與模型</h2>
           <div className="data-summary-row"><span>行情驗證</span><strong>{loading ? '同步中' : completeSync ? '完整' : '部分'}</strong></div>
-          <div className="data-summary-row"><span>估計狀態</span><strong>暫定・未回測</strong></div>
+          <div className="data-summary-row"><span>估計狀態</span><strong>{forecastAvailable ? '已保存・暫定・未回測' : '尚無可用估計'}</strong></div>
         </div>
       </section>
 
@@ -410,7 +448,7 @@ function App() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 pb-4">
           {forecastDetails('2330', '台積電', forecasts.tw2330, 'tw2330')}
           {forecastDetails(tickers.b, '富邦台50', forecasts.twB, 'twB')}
-          {forecastDetails(tickers.c, '國泰永續高股息', forecasts.twC, 'twC')}
+          {forecastDetails('IX0001', '台灣加權股價指數', forecasts.ix0001, 'ix0001')}
         </div>
       </details>
 
@@ -440,9 +478,9 @@ function App() {
             <div className="manual-ticker-row flex items-center justify-between gap-2"><input aria-label="006208 ticker" type="text" className="input-field w-24 px-2 py-1 rounded text-xs" value={tickers.b} onChange={e => setTickers(v => ({ ...v, b: e.target.value.trim() }))} />
               <input aria-label={`${tickers.b} previous close`} type="number" step="0.01" className="input-field w-32 px-2 py-1 rounded text-right text-slate-700" placeholder="自動資料 / 手動備援" value={inputValue('twB')} onFocus={() => revealManualValue('twB')} onBlur={() => formatManualValue('twB')} onChange={e => updateManual('twB', e.target.value)} /></div>
             <div className="text-xs text-slate-500 break-words">{freshnessText('twB')}；來源 {quoteSource('twB')}；市場時間 {sourceTime(inputs.twB, 'twB')}{quoteRetrievedAt('twB')}</div>
-            <div className="manual-ticker-row flex items-center justify-between gap-2"><input aria-label="00878 ticker" type="text" className="input-field w-24 px-2 py-1 rounded text-xs" value={tickers.c} onChange={e => setTickers(v => ({ ...v, c: e.target.value.trim() }))} />
-              <input aria-label={`${tickers.c} previous close`} type="number" step="0.01" className="input-field w-32 px-2 py-1 rounded text-right text-slate-700" placeholder="自動資料 / 手動備援" value={inputValue('twC')} onFocus={() => revealManualValue('twC')} onBlur={() => formatManualValue('twC')} onChange={e => updateManual('twC', e.target.value)} /></div>
-            <div className="text-xs text-slate-500 break-words">{freshnessText('twC')}；來源 {quoteSource('twC')}；市場時間 {sourceTime(inputs.twC, 'twC')}{quoteRetrievedAt('twC')}</div>
+            {field('twIndex', 'IX0001 台灣加權指數', '0.01')}
+            <div className="text-xs text-slate-500 break-words">{freshnessText('twIndex')}；來源 {quoteSource('twIndex')}；市場時間 {sourceTime(inputs.twIndex, 'twIndex')}{quoteRetrievedAt('twIndex')}；<a className="source-link" href="https://developer.fugle.tw/docs/data/http-api/historical/candles/" target="_blank" rel="noreferrer">Fugle</a></div>
+            <div className="text-xs text-slate-500 break-words">TAIEX 台積電權重：{Number.isFinite(bundle.indexWeight?.weight) ? `${(bundle.indexWeight.weight * 100).toFixed(4)}%` : '未驗證'}；資料日 {bundle.indexWeight?.sessionDate || '—'}；來源 {bundle.indexWeight?.source || 'TAIFEX 未驗證'}</div>
             <p className="text-xs text-slate-500">欄位可手動覆寫自動資料；輸入值會標示為手動備援。</p>
           </section>
         </div>
