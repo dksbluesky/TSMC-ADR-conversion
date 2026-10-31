@@ -466,6 +466,18 @@ function App() {
 
       <details className="glass-panel rounded-xl px-4 md:px-5 mb-4">
         <summary className="disclosure-summary font-semibold text-slate-800">行情來源、驗證與手動覆寫</summary>
+        <div className="space-y-2 border-b border-slate-200 py-3 mb-3">
+          <label htmlFor="fugle-api-key" className="block text-xs font-medium text-slate-600">Fugle API Key（此 App）</label>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input id="fugle-api-key" type="password" autoComplete="off" className="input-field min-w-0 flex-1 px-3 py-2 rounded text-sm"
+              placeholder="貼上 Fugle API Key" value={fugleApiKey} onChange={event => setFugleApiKey(event.target.value)} />
+            <button type="button" onClick={saveFugleApiKey} disabled={loading || !fugleApiKey.trim()}
+              className="btn-live text-white px-3 py-2 rounded-lg text-sm font-semibold min-h-[44px] disabled:opacity-50">
+              儲存並重新驗證
+            </button>
+          </div>
+          <p className="text-xs text-slate-500 break-words">金鑰儲存在此 App 的本機；擷取時會透過 HTTPS 傳送給 Fugle。iPhone 主畫面版與 TAR-OBI 的儲存分開，請在這裡輸入一次。</p>
+        </div>
         {(errors.length > 0 || calendarError) && <div className="pb-3 text-xs text-rose-700">
           {errors.map(error => <div key={error}>{error}</div>)}
           {calendarError && <div>{calendarError}</div>}
@@ -493,18 +505,6 @@ function App() {
             {field('twIndex', 'IX0001 台灣加權指數', '0.01')}
             <div className="text-xs text-slate-500 break-words">{freshnessText('twIndex')}；來源 {quoteSource('twIndex')}；市場時間 {sourceTime(inputs.twIndex, 'twIndex')}{quoteRetrievedAt('twIndex')}；<a className="source-link" href="https://developer.fugle.tw/docs/data/http-api/historical/candles/" target="_blank" rel="noreferrer">Fugle</a></div>
             <div className="text-xs text-slate-500 break-words">TAIEX 台積電權重：{Number.isFinite(bundle.indexWeight?.weight) ? `${(bundle.indexWeight.weight * 100).toFixed(4)}%` : '未驗證'}；資料日 {bundle.indexWeight?.sessionDate || '—'}；來源 {bundle.indexWeight?.source || 'TAIFEX 未驗證'}</div>
-            <div className="space-y-2 border-t border-slate-200 pt-3">
-              <label htmlFor="fugle-api-key" className="block text-xs font-medium text-slate-600">Fugle API Key（此 App）</label>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <input id="fugle-api-key" type="password" autoComplete="off" className="input-field min-w-0 flex-1 px-3 py-2 rounded text-sm"
-                  placeholder="貼上 Fugle API Key" value={fugleApiKey} onChange={event => setFugleApiKey(event.target.value)} />
-                <button type="button" onClick={saveFugleApiKey} disabled={loading || !fugleApiKey.trim()}
-                  className="btn-live text-white px-3 py-2 rounded-lg text-sm font-semibold min-h-[44px] disabled:opacity-50">
-                  儲存並重新驗證
-                </button>
-              </div>
-              <p className="text-xs text-slate-500 break-words">金鑰儲存在此 App 的本機；擷取時會透過 HTTPS 傳送給 Fugle。iPhone 主畫面版與 TAR-OBI 的儲存分開，請在這裡輸入一次。</p>
-            </div>
             <p className="text-xs text-slate-500">欄位可手動覆寫自動資料；輸入值會標示為手動備援。</p>
           </section>
         </div>

@@ -498,7 +498,7 @@ test('service worker installs the changed app shell and activates the new cache 
   };
   const caches = {
     open: async name => ({ addAll: async files => { added.push({ name, files }); }, put: async () => {} }),
-    keys: async () => ['tsmc-adr-shell-v2', 'another-cache', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6', 'tsmc-adr-shell-v7', 'tsmc-adr-shell-v8', 'tsmc-adr-shell-v9'],
+    keys: async () => ['tsmc-adr-shell-v2', 'another-cache', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6', 'tsmc-adr-shell-v7', 'tsmc-adr-shell-v8', 'tsmc-adr-shell-v9', 'tsmc-adr-shell-v10'],
     delete: async key => { deleted.push(key); return true; },
     match: async () => null
   };
@@ -513,7 +513,7 @@ test('service worker installs the changed app shell and activates the new cache 
   let activatePromise;
   handlers.activate({ waitUntil: promise => { activatePromise = promise; } });
   await activatePromise;
-  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6', 'tsmc-adr-shell-v7', 'tsmc-adr-shell-v8', 'tsmc-adr-shell-v9'].sort());
+  assert.deepEqual(deleted.sort(), ['another-cache', 'tsmc-adr-shell-v2', 'tsmc-adr-shell-v3', 'tsmc-adr-shell-v4', 'tsmc-adr-shell-v5', 'tsmc-adr-shell-v6', 'tsmc-adr-shell-v7', 'tsmc-adr-shell-v8', 'tsmc-adr-shell-v9', 'tsmc-adr-shell-v10'].sort());
 });
 
 test('TSMC app provides a local Fugle key entry path for isolated iOS app storage', () => {
