@@ -482,6 +482,10 @@ test('opening forecasts reject missing, stale, mismatched, and out-of-window inp
 
 test('service worker installs the changed app shell and activates the new cache version', async () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'service-worker.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const cacheVersion = source.match(/CACHE_NAME\s*=\s*'tsmc-adr-shell-v(\d+)'/)?.[1];
+  assert.ok(cacheVersion);
+  assert.ok(html.includes(`./app.jsx?v=${cacheVersion}`));
   const handlers = {};
   const added = [];
   const deleted = [];
